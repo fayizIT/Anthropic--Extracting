@@ -253,7 +253,7 @@ export default function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [jsonFile, setJsonFile] = useState<File | null>(null)
   const [apiKey, setApiKey] = useState('')
-  const [boothId, setBoothId] = useState('69c57f7db65ab7300128dc53')
+  const [boothId, setBoothId] = useState('')
 
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState(0)
