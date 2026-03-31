@@ -121,20 +121,49 @@ app.get('/api/voters', async (_req, res) => {
 })
 
 // ─── ANTHROPIC PROXY (fixes CORS) ────────────────────────────────────────────
-app.post('/api/anthropic', (req, res) => {
+// app.post('/api/anthropic', (req, res) => {
+//   const apiKey = req.headers['x-api-key']
+//   if (!apiKey) return res.status(400).json({ error: 'Missing x-api-key header' })
+
+//   const body = JSON.stringify(req.body)
+//   const opts = {
+//     hostname: 'api.anthropic.com',
+//     path:     '/v1/messages',
+//     method:   'POST',
+//     headers: {
+//       'Content-Type':      'application/json',
+//       'Content-Length':    Buffer.byteLength(body),
+//       'x-api-key':         apiKey,
+//       'anthropic-version': '2023-06-01',
+//     },
+//   }
+
+//   const pr = https.request(opts, (upstream) => {
+//     res.status(upstream.statusCode).setHeader('Content-Type', 'application/json')
+//     let data = ''
+//     upstream.on('data', c => { data += c })
+//     upstream.on('end', () => res.send(data))
+//   })
+//   pr.on('error', err => res.status(500).json({ error: err.message }))
+//   pr.write(body)
+//   pr.end()
+// })
+
+// ─── GEMINI PROXY (fixes CORS) ────────────────────────────────────────────────
+app.post('/api/gemini', (req, res) => {
   const apiKey = req.headers['x-api-key']
   if (!apiKey) return res.status(400).json({ error: 'Missing x-api-key header' })
 
-  const body = JSON.stringify(req.body)
+  const { model = 'gemini-2.5-flash-lite', ...body } = req.body
+  const bodyStr = JSON.stringify(body)
+
   const opts = {
-    hostname: 'api.anthropic.com',
-    path:     '/v1/messages',
-    method:   'POST',
+    hostname: 'generativelanguage.googleapis.com',
+    path: `/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    method: 'POST',
     headers: {
-      'Content-Type':      'application/json',
-      'Content-Length':    Buffer.byteLength(body),
-      'x-api-key':         apiKey,
-      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
     },
   }
 
@@ -145,7 +174,7 @@ app.post('/api/anthropic', (req, res) => {
     upstream.on('end', () => res.send(data))
   })
   pr.on('error', err => res.status(500).json({ error: err.message }))
-  pr.write(body)
+  pr.write(bodyStr)
   pr.end()
 })
 

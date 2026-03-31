@@ -500,8 +500,8 @@ function handleSaveEdit(updated: VoterRecord) {
               <input className={s.input} value={boothId} onChange={e => setBoothId(e.target.value)} placeholder="69c57f7db65ab7300128dc53" />
             </div>
             <div className={s.field}>
-              <label className={s.fieldLabel}>Anthropic API Key</label>
-              <input className={s.input} type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-ant-api03-..." />
+            <label className={s.fieldLabel}>Gemini API Key</label>
+<input className={s.input} type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="AIza..." />
             </div>
           </div>
 

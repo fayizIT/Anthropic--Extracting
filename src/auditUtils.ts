@@ -123,57 +123,125 @@ export function computeWardStats(results: AuditResult[]): WardStat[] {
   return Array.from(map.values()).sort((a, b) => a.ward.localeCompare(b.ward))
 }
 
+// export async function extractPdfVoters(base64Pdf: string, apiKey: string): Promise<VoterRecord[]> {
+//   const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text, Booth 56).
+// Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
+// name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
+// relation name in Malayalam, house number/name, age (പ്രായം), gender.
+
+// Gender: explicitly "Male" or "Female" based on position (male=left column, female=right column pattern, or ഫോട്ടോ ലഭ്യമണ്/ലഭ്യമില്ല label).
+// Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
+
+// Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
+// [{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
+
+//   // Calls local proxy (server.js) to avoid CORS
+//   const resp = await fetch('http://localhost:3001/api/anthropic', {
+//     method: 'POST',
+//     headers: {
+//       'Content-Type': 'application/json',
+//       'x-api-key': apiKey,
+//     },
+//     body: JSON.stringify({
+//       model: 'claude-opus-4-5',
+//       max_tokens: 16000,
+//       messages: [{
+//         role: 'user',
+//         content: [
+//           { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf } },
+//           { type: 'text', text: prompt },
+//         ],
+//       }],
+//     }),
+//   })
+
+//   if (!resp.ok) {
+//     const err = await resp.json() as { error?: { message?: string } }
+//     throw new Error('API error: ' + (err.error?.message ?? resp.status))
+//   }
+
+//   const data = await resp.json() as { content: Array<{ type: string; text?: string }> }
+//   const text = data.content.map(b => b.text ?? '').join('')
+//   const clean = text.replace(/```json|```/g, '').trim()
+
+//   try {
+//     return JSON.parse(clean) as VoterRecord[]
+//   } catch {
+//     // Salvage truncated JSON
+//     const lastComma = clean.lastIndexOf('},')
+//     if (lastComma > 0) {
+//       const salvaged = (clean.startsWith('[') ? '' : '[') + clean.slice(0, lastComma + 1) + ']'
+//       try { return JSON.parse(salvaged) as VoterRecord[] } catch { /* fall through */ }
+//     }
+//     throw new Error('Failed to parse AI response. The PDF may be too large — try splitting pages.')
+//   }
+// }
+
+
 export async function extractPdfVoters(base64Pdf: string, apiKey: string): Promise<VoterRecord[]> {
   const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text, Booth 56).
 Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
 name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
 relation name in Malayalam, house number/name, age (പ്രായം), gender.
 
-Gender: explicitly "Male" or "Female" based on position (male=left column, female=right column pattern, or ഫോട്ടോ ലഭ്യമണ്/ലഭ്യമില്ല label).
+Gender: explicitly "Male" or "Female" based on position (male=left column, female=right column pattern).
 Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
 
 Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
 [{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
 
-  // Calls local proxy (server.js) to avoid CORS
-  const resp = await fetch('http://localhost:3001/api/anthropic', {
+  const resp = await fetch('http://localhost:3001/api/gemini', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
     },
     body: JSON.stringify({
-      model: 'claude-opus-4-5',
-      max_tokens: 16000,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf } },
-          { type: 'text', text: prompt },
+     model: 'gemini-2.5-flash',        
+      contents: [{
+        parts: [
+          {
+            inline_data: {
+              mime_type: 'application/pdf',
+              data: base64Pdf,
+            },
+          },
+          { text: prompt },
         ],
       }],
+      generationConfig: {
+        maxOutputTokens: 16000,
+        temperature: 0,
+      },
     }),
   })
 
   if (!resp.ok) {
     const err = await resp.json() as { error?: { message?: string } }
-    throw new Error('API error: ' + (err.error?.message ?? resp.status))
+    throw new Error('Gemini API error: ' + (err.error?.message ?? resp.status))
   }
 
-  const data = await resp.json() as { content: Array<{ type: string; text?: string }> }
-  const text = data.content.map(b => b.text ?? '').join('')
+  const data = await resp.json() as {
+    candidates: Array<{
+      content: { parts: Array<{ text: string }> }
+    }>
+  }
+
+  const text = data.candidates?.[0]?.content?.parts
+    ?.map(p => p.text ?? '')
+    .join('') ?? ''
+
   const clean = text.replace(/```json|```/g, '').trim()
 
   try {
     return JSON.parse(clean) as VoterRecord[]
   } catch {
-    // Salvage truncated JSON
     const lastComma = clean.lastIndexOf('},')
     if (lastComma > 0) {
       const salvaged = (clean.startsWith('[') ? '' : '[') + clean.slice(0, lastComma + 1) + ']'
       try { return JSON.parse(salvaged) as VoterRecord[] } catch { /* fall through */ }
     }
-    throw new Error('Failed to parse AI response. The PDF may be too large — try splitting pages.')
+    throw new Error('Failed to parse Gemini response. Try splitting the PDF into fewer pages.')
   }
 }
 
