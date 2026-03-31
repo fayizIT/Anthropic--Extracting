@@ -214,10 +214,13 @@ export interface BulkUpdateResult {
 }
 
 /** Build fields-to-update object from an AuditResult (only mismatched fields, PDF values) */
-export function buildUpdatePayload(result: import('./types').AuditResult): Record<string, unknown> {
+export function buildUpdatePayload(result: AuditResult): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
-  for (const [field, diff] of Object.entries(result.mismatches)) {
-    if (diff.pdf) payload[field] = diff.pdf
+  for (const field of Object.keys(result.mismatches)) {
+    const correctedVal = result.corrected[field as keyof VoterRecord]
+    if (correctedVal !== undefined && correctedVal !== null && correctedVal !== '') {
+      payload[field] = correctedVal  // ✅ uses edited corrected value
+    }
   }
   return payload
 }

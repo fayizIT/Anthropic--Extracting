@@ -356,19 +356,22 @@ export default function App() {
     }
   }
 
-  async function pushSingle(result: AuditResult) {
-    const fields = buildUpdatePayload(result)
-    if (Object.keys(fields).length === 0) return
-    setPushingVoterId(result.voterId)
-    try {
-      await pushSingleToDb(result.voterId, fields)
-      setPushedIds(prev => new Set([...prev, result.voterId]))
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'DB push failed')
-    } finally {
-      setPushingVoterId(null)
-    }
+ async function pushSingle(result: AuditResult) {
+  // ✅ Always get the latest version from results state
+  const latest = results.find(r => r.voterId === result.voterId) ?? result
+  
+  const fields = buildUpdatePayload(latest)  // ✅ now uses edited corrected data
+  if (Object.keys(fields).length === 0) return
+  setPushingVoterId(result.voterId)
+  try {
+    await pushSingleToDb(result.voterId, fields)
+    setPushedIds(prev => new Set([...prev, result.voterId]))
+  } catch (e) {
+    setError(e instanceof Error ? e.message : 'DB push failed')
+  } finally {
+    setPushingVoterId(null)
   }
+}
 
   async function pushAllMismatches() {
     setBulkPushing(true)
