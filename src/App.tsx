@@ -326,29 +326,20 @@ function handleSaveEdit(updated: VoterRecord) {
   if (!editResult) return
   setResults(prev => prev.map(r => {
     if (r.voterId !== editResult.voterId) return r
-
-    // Rebuild mismatches to reflect edited values
-    const newMismatches: typeof r.mismatches = {}
-    for (const [field, diff] of Object.entries(r.mismatches)) {
-      const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
-      const jsonVal = diff.json
-
-      // If edited value differs from original JSON → still a mismatch, show edited value
-      // If edited value matches JSON → no longer a mismatch
-      if (editedVal !== jsonVal) {
-        newMismatches[field] = { pdf: editedVal, json: jsonVal }
-      }
-      // else: field is now matching, drop from mismatches
-    }
-
     return {
       ...r,
-      corrected: updated,
-      mismatches: newMismatches,
-      // Update status if all mismatches resolved
-      status: Object.keys(newMismatches).length === 0 ? 'Match' : 'Mismatch',
+      corrected: updated,        // ✅ manually edited values saved here
+      mismatches: r.mismatches,  // ✅ keep original keys — don't rebuild or clear
     }
   }))
+
+  // ✅ re-enable push button after re-edit
+  setPushedIds(prev => {
+    const next = new Set(prev)
+    next.delete(editResult.voterId)
+    return next
+  })
+
   setEditResult(null)
 }
 
@@ -644,21 +635,21 @@ function handleSaveEdit(updated: VoterRecord) {
                               <button className={s.viewBtn} onClick={() => setViewResult(r)} title="View"><Eye size={12} /></button>
                               <button className={s.editIconBtn} onClick={() => setEditResult(r)} title="Edit"><Pencil size={12} /></button>
                               {r.status === 'Mismatch' && (
-                                <button
-                                  className={`${s.pushBtn} ${pushedIds.has(r.voterId) ? s.pushBtnDone : ''}`}
-                                  onClick={() => {
-  const latest = results.find(x => x.voterId === r.voterId) ?? r
-  pushSingle(latest)
-}}
-                                  disabled={pushingVoterId === r.voterId || pushedIds.has(r.voterId)}
-                                  title="Push corrected fields to MongoDB"
-                                >
-                                  {pushingVoterId === r.voterId
-                                    ? <Loader2 size={11} className={s.spin} />
-                                    : pushedIds.has(r.voterId)
-                                    ? <CheckCircle2 size={11} />
-                                    : <Database size={11} />}
-                                </button>
+                               <button
+  className={`${s.pushBtn} ${pushedIds.has(r.voterId) ? s.pushBtnDone : ''}`}
+  onClick={() => {
+    const latest = results.find(x => x.voterId === r.voterId) ?? r
+    pushSingle(latest)
+  }}
+  disabled={pushingVoterId === r.voterId}  // ✅ only disable while actively pushing
+  title="Push corrected fields to MongoDB"
+>
+  {pushingVoterId === r.voterId
+    ? <Loader2 size={11} className={s.spin} />
+    : pushedIds.has(r.voterId)
+    ? <CheckCircle2 size={11} color="var(--match)" />  // ✅ shows tick but still clickable
+    : <Database size={11} />}
+</button>
                               )}
                             </div>
                           </td>
