@@ -146,11 +146,17 @@ function InlineEditor({ result, onSave, onClose }: {
                     <span className={s.srcPdf}>PDF: {diff.pdf || '—'}</span>
                   </div>
                 )}
-                <input
+                {/* <input
                   className={s.editorInput}
                   value={normalize(draft[f])}
                   onChange={e => setDraft(prev => ({ ...prev, [f]: e.target.value }))}
-                />
+                /> */}
+
+                <input
+  className={s.editorInput}
+  value={(draft[f] as string) ?? ''}   // ✅ remove normalize
+  onChange={e => setDraft(prev => ({ ...prev, [f]: e.target.value }))}
+/>
               </div>
             )
           })}
@@ -316,13 +322,35 @@ export default function App() {
     else { setSortField(field); setSortDir('asc') }
   }
 
-  function handleSaveEdit(updated: VoterRecord) {
-    if (!editResult) return
-    setResults(prev => prev.map(r =>
-      r.voterId === editResult.voterId ? { ...r, corrected: updated } : r
-    ))
-    setEditResult(null)
-  }
+function handleSaveEdit(updated: VoterRecord) {
+  if (!editResult) return
+  setResults(prev => prev.map(r => {
+    if (r.voterId !== editResult.voterId) return r
+
+    // Rebuild mismatches to reflect edited values
+    const newMismatches: typeof r.mismatches = {}
+    for (const [field, diff] of Object.entries(r.mismatches)) {
+      const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
+      const jsonVal = diff.json
+
+      // If edited value differs from original JSON → still a mismatch, show edited value
+      // If edited value matches JSON → no longer a mismatch
+      if (editedVal !== jsonVal) {
+        newMismatches[field] = { pdf: editedVal, json: jsonVal }
+      }
+      // else: field is now matching, drop from mismatches
+    }
+
+    return {
+      ...r,
+      corrected: updated,
+      mismatches: newMismatches,
+      // Update status if all mismatches resolved
+      status: Object.keys(newMismatches).length === 0 ? 'Match' : 'Mismatch',
+    }
+  }))
+  setEditResult(null)
+}
 
   async function runAudit() {
     if (!pdfFile) { setError('Upload the electoral roll PDF.'); return }
@@ -618,7 +646,10 @@ export default function App() {
                               {r.status === 'Mismatch' && (
                                 <button
                                   className={`${s.pushBtn} ${pushedIds.has(r.voterId) ? s.pushBtnDone : ''}`}
-                                  onClick={() => pushSingle(r)}
+                                  onClick={() => {
+  const latest = results.find(x => x.voterId === r.voterId) ?? r
+  pushSingle(latest)
+}}
                                   disabled={pushingVoterId === r.voterId || pushedIds.has(r.voterId)}
                                   title="Push corrected fields to MongoDB"
                                 >
@@ -648,7 +679,7 @@ export default function App() {
       {/* Modals */}
       {viewResult && (
         <RecordModal
-          result={viewResult}
+          result={results.find(r => r.voterId === viewResult.voterId) ?? viewResult}
           onClose={() => setViewResult(null)}
           onEdit={() => { setEditResult(viewResult); setViewResult(null) }}
         />
