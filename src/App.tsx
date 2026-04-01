@@ -3,14 +3,14 @@ import {
   FileText, FileJson, CheckCircle2, AlertTriangle, XCircle,
   Upload, Loader2, Eye, Download, X, ChevronDown, BarChart3,
   Search, ArrowUpDown, Pencil, Save, Printer, RefreshCw,
-  Database, CloudUpload,
+  Database, CloudUpload, UserPlus,
   type LucideIcon,
 } from 'lucide-react'
 import type { AuditResult, AuditStats, AuditStatus, VoterRecord, SortField, SortDir, WardStat } from './types'
 import {
   compareRecords, extractPdfVoters, fileToBase64, fileToText,
   normalize, computeWardStats, FIELD_LABELS, COMPARE_FIELDS,
-  pushSingleToDb, pushBulkToDb, buildUpdatePayload,
+  pushSingleToDb, insertSingleToDb, pushBulkToDb, buildUpdatePayload, buildInsertPayload,
   type BulkUpdateResult,
 } from './auditUtils'
 import { exportToExcel, exportToCSV, exportToJSON } from './exportUtils'
@@ -132,7 +132,6 @@ function InlineEditor({ result, onSave, onClose }: {
           <button className={s.modalClose} onClick={onClose}><X size={16} /></button>
         </div>
 
-        {/* Side-by-side diff + editable */}
         <div className={s.editorGrid}>
           {fields.map(f => {
             const diff = result.mismatches[f]
@@ -146,23 +145,16 @@ function InlineEditor({ result, onSave, onClose }: {
                     <span className={s.srcPdf}>PDF: {diff.pdf || '—'}</span>
                   </div>
                 )}
-                {/* <input
-                  className={s.editorInput}
-                  value={normalize(draft[f])}
-                  onChange={e => setDraft(prev => ({ ...prev, [f]: e.target.value }))}
-                /> */}
-
                 <input
-  className={s.editorInput}
-  value={(draft[f] as string) ?? ''}   // ✅ remove normalize
-  onChange={e => setDraft(prev => ({ ...prev, [f]: e.target.value }))}
-/>
+                  className={s.editorInput}
+                  value={(draft[f] as string) ?? ''}
+                  onChange={e => setDraft(prev => ({ ...prev, [f]: e.target.value }))}
+                />
               </div>
             )
           })}
         </div>
 
-        {/* Extra DB fields (read-only) */}
         <div className={s.modalSection}>
           <div className={s.modalSectionTitle}>Database-only fields (preserved)</div>
           <div className={s.modalGrid}>
@@ -213,6 +205,13 @@ function RecordModal({ result, onClose, onEdit }: {
           <div className={s.diffSummary}>
             <AlertTriangle size={13} color="var(--mismatch)" />
             <span>{Object.keys(result.mismatches).length} field(s) differ — PDF overrides JSON below</span>
+          </div>
+        )}
+
+        {result.status === 'Missing in Target' && (
+          <div className={s.diffSummary}>
+            <UserPlus size={13} color="var(--missing)" />
+            <span>This voter exists in PDF but not in MongoDB — push to insert</span>
           </div>
         )}
 
@@ -322,51 +321,69 @@ export default function App() {
     else { setSortField(field); setSortDir('asc') }
   }
 
-function handleSaveEdit(updated: VoterRecord) {
-  if (!editResult) return
-  setResults(prev => prev.map(r => {
-    if (r.voterId !== editResult.voterId) return r
-    return {
-      ...r,
-      corrected: updated,        // ✅ manually edited values saved here
-      mismatches: r.mismatches,  // ✅ keep original keys — don't rebuild or clear
-    }
-  }))
+  function handleSaveEdit(updated: VoterRecord) {
+    if (!editResult) return
+    setResults(prev => prev.map(r => {
+      if (r.voterId !== editResult.voterId) return r
 
-  // ✅ re-enable push button after re-edit
-  setPushedIds(prev => {
-    const next = new Set(prev)
-    next.delete(editResult.voterId)
-    return next
-  })
+      // Rebuild mismatches based on edited values vs original JSON
+      const newMismatches: typeof r.mismatches = {}
+      for (const [field, diff] of Object.entries(r.mismatches)) {
+        const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
+        if (editedVal !== diff.json) {
+          newMismatches[field] = { pdf: editedVal, json: diff.json }
+        }
+      }
 
-  setEditResult(null)
-}
+      return {
+        ...r,
+        corrected: updated,
+        mismatches: newMismatches,
+        status: Object.keys(newMismatches).length === 0 ? 'Match' : 'Mismatch',
+      }
+    }))
+
+    // Re-enable push after re-edit
+    setPushedIds(prev => {
+      const next = new Set(prev)
+      next.delete(editResult.voterId)
+      return next
+    })
+
+    setEditResult(null)
+  }
 
   async function runAudit() {
     if (!pdfFile) { setError('Upload the electoral roll PDF.'); return }
     if (!jsonFile) { setError('Upload the JSON voter records.'); return }
-    if (!apiKey) { setError('Enter your Anthropic API key.'); return }
+    if (!apiKey) { setError('Enter your Gemini API key.'); return }
 
     setError(null); setIsRunning(true); setResults([])
     setFilter('all'); setSearch('')
+    setPushedIds(new Set())
 
     try {
       setProgress(5); setProgressMsg('Reading PDF...')
       const b64 = await fileToBase64(pdfFile)
 
-      setProgress(15); setProgressMsg('Sending to Claude AI — extracting Malayalam voter records...')
-      const pdfRecords = await extractPdfVoters(b64, apiKey)
+      // Pass progress callback so chunk-by-chunk updates show in UI
+      const pdfRecords = await extractPdfVoters(b64, apiKey, (msg, pct) => {
+        setProgressMsg(msg)
+        setProgress(pct)
+      })
 
-      setProgress(65); setProgressMsg(`Extracted ${pdfRecords.length} records from PDF. Loading JSON...`)
+      setProgress(82); setProgressMsg(`Extracted ${pdfRecords.length} records from PDF. Loading JSON...`)
       const txt = await fileToText(jsonFile)
       let jsonRecords: VoterRecord[] = JSON.parse(txt)
       if (!Array.isArray(jsonRecords)) jsonRecords = [jsonRecords]
 
-      setProgress(82); setProgressMsg(`Loaded ${jsonRecords.length} JSON records. Comparing...`)
+      setProgress(90); setProgressMsg(`Loaded ${jsonRecords.length} JSON records. Comparing...`)
       const auditResults = compareRecords(pdfRecords, jsonRecords, boothId)
 
-      setProgress(100); setProgressMsg(`Done — ${auditResults.length} records compared`)
+      setProgress(100)
+      const m = auditResults.filter(r => r.status === 'Mismatch').length
+      const mt = auditResults.filter(r => r.status === 'Missing in Target').length
+      setProgressMsg(`Done — ${auditResults.length} records · ${m} mismatches · ${mt} missing in DB`)
       setResults(auditResults)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error occurred.')
@@ -375,32 +392,43 @@ function handleSaveEdit(updated: VoterRecord) {
     }
   }
 
- async function pushSingle(result: AuditResult) {
-  // ✅ Always get the latest version from results state
-  const latest = results.find(r => r.voterId === result.voterId) ?? result
-  
-  const fields = buildUpdatePayload(latest)  // ✅ now uses edited corrected data
-  if (Object.keys(fields).length === 0) return
-  setPushingVoterId(result.voterId)
-  try {
-    await pushSingleToDb(result.voterId, fields)
-    setPushedIds(prev => new Set([...prev, result.voterId]))
-  } catch (e) {
-    setError(e instanceof Error ? e.message : 'DB push failed')
-  } finally {
-    setPushingVoterId(null)
-  }
-}
+  // Push a single mismatch correction OR insert a missing voter
+  async function pushSingle(result: AuditResult) {
+    const latest = results.find(r => r.voterId === result.voterId) ?? result
+    setPushingVoterId(result.voterId)
 
-  async function pushAllMismatches() {
+    try {
+      if (latest.status === 'Missing in Target') {
+        // Insert PDF-only voter into MongoDB
+        const payload = buildInsertPayload(latest)
+        await insertSingleToDb(payload)
+      } else if (latest.status === 'Mismatch') {
+        // Update existing voter with corrected fields
+        const fields = buildUpdatePayload(latest)
+        if (Object.keys(fields).length === 0) return
+        await pushSingleToDb(result.voterId, fields)
+      }
+      setPushedIds(prev => new Set([...prev, result.voterId]))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'DB push failed')
+    } finally {
+      setPushingVoterId(null)
+    }
+  }
+
+  // Bulk push: update all mismatches + insert all Missing in Target
+  async function pushAllToDb() {
     setBulkPushing(true)
     setBulkResult(null)
     try {
       const res = await pushBulkToDb(results)
       setBulkResult(res)
-      // Mark all successfully updated as pushed
-      const mismatches = results.filter(r => r.status === 'Mismatch')
-      setPushedIds(prev => new Set([...prev, ...mismatches.map(r => r.voterId)]))
+
+      // Mark all mismatches and missing-in-target as pushed
+      const pushed = results
+        .filter(r => r.status === 'Mismatch' || r.status === 'Missing in Target')
+        .map(r => r.voterId)
+      setPushedIds(prev => new Set([...prev, ...pushed]))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Bulk push failed')
     } finally {
@@ -408,11 +436,11 @@ function handleSaveEdit(updated: VoterRecord) {
     }
   }
 
-  function handlePrint() {
-    window.print()
-  }
+  function handlePrint() { window.print() }
 
   const hasResults = results.length > 0
+  const pushableCount = stats.mismatch + stats.missingTarget
+
   const SortBtn = ({ field, label }: { field: SortField; label: string }) => (
     <button className={`${s.sortBtn} ${sortField === field ? s.sortBtnActive : ''}`}
       onClick={() => toggleSort(field)}>
@@ -426,7 +454,7 @@ function handleSaveEdit(updated: VoterRecord) {
       <header className={s.header}>
         <div className={s.headerLeft}>
           <div className={s.logo}><span className={s.logoAccent}>CANARY</span><span className={s.logoDot}> · </span>POLL PULSE</div>
-          <div className={s.logoSub}>Voter Roll Audit  ·  PDF × JSON × MongoDB boothId</div>
+          <div className={s.logoSub}>Voter Roll Audit  ·  PDF × JSON × MongoDB</div>
         </div>
         <div className={s.headerRight}>
           {hasResults && (
@@ -449,34 +477,38 @@ function handleSaveEdit(updated: VoterRecord) {
                   </div>
                 )}
               </div>
+              {/* Bulk push: mismatches + missing-in-target */}
               <button
                 className={s.pushAllBtn}
-                onClick={pushAllMismatches}
-                disabled={bulkPushing || stats.mismatch === 0}
-                title={`Push all ${stats.mismatch} mismatches to MongoDB`}
+                onClick={pushAllToDb}
+                disabled={bulkPushing || pushableCount === 0}
+                title={`Push ${stats.mismatch} mismatches + insert ${stats.missingTarget} missing voters`}
               >
                 {bulkPushing
                   ? <><Loader2 size={13} className={s.spin} /> Pushing...</>
-                  : <><CloudUpload size={13} /> Push {stats.mismatch} to DB</>}
+                  : <><CloudUpload size={13} /> Push {pushableCount} to DB</>}
               </button>
             </>
           )}
         </div>
       </header>
 
+      {/* Bulk result banner */}
       {bulkResult && (
         <div className={`${s.bulkBanner} ${bulkResult.errorCount === 0 ? s.bulkSuccess : s.bulkPartial}`}>
           <Database size={14} />
           <span>
-            <strong>{bulkResult.successCount}</strong> voters updated in MongoDB
+            <strong>{bulkResult.successCount}</strong> updated
+            {(bulkResult.insertedCount ?? 0) > 0 && <> · <strong>{bulkResult.insertedCount}</strong> inserted</>}
             {bulkResult.notFoundCount > 0 && <> · <strong>{bulkResult.notFoundCount}</strong> not found</>}
             {bulkResult.errorCount > 0 && <> · <strong>{bulkResult.errorCount}</strong> errors</>}
           </span>
           <button className={s.bannerClose} onClick={() => setBulkResult(null)}><X size={12} /></button>
         </div>
       )}
+
       <div className={s.layout}>
-        {/* LEFT PANEL — Setup */}
+        {/* LEFT PANEL */}
         <aside className={s.sidebar}>
           <div className={s.sectionLabel}><Upload size={11} /> Files</div>
           <div className={s.uploadCol}>
@@ -491,8 +523,8 @@ function handleSaveEdit(updated: VoterRecord) {
               <input className={s.input} value={boothId} onChange={e => setBoothId(e.target.value)} placeholder="69c57f7db65ab7300128dc53" />
             </div>
             <div className={s.field}>
-            <label className={s.fieldLabel}>Gemini API Key</label>
-<input className={s.input} type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="AIza..." />
+              <label className={s.fieldLabel}>Gemini API Key</label>
+              <input className={s.input} type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="AIza..." />
             </div>
           </div>
 
@@ -532,7 +564,7 @@ function handleSaveEdit(updated: VoterRecord) {
                   onClick={() => setFilter('Missing in Source')} active={filter === 'Missing in Source'} />
               </div>
 
-              <button className={s.resetBtn} onClick={() => { setResults([]); setPdfFile(null); setJsonFile(null) }}>
+              <button className={s.resetBtn} onClick={() => { setResults([]); setPdfFile(null); setJsonFile(null); setPushedIds(new Set()) }}>
                 <RefreshCw size={12} /> New Audit
               </button>
             </>
@@ -545,16 +577,17 @@ function handleSaveEdit(updated: VoterRecord) {
             <div className={s.emptyState}>
               <div className={s.emptyIcon}><FileText size={40} strokeWidth={1} /></div>
               <div className={s.emptyTitle}>Upload files and run audit</div>
-              <div className={s.emptySub}>Claude AI will extract Malayalam voter data from the PDF and compare it against your JSON database, matched by Voter ID and filtered by boothId.</div>
+              <div className={s.emptySub}>
+                Gemini AI will extract ALL voters from the full PDF (chunked automatically),
+                compare against your JSON database by Voter ID, and show mismatches + missing voters ready to push to MongoDB.
+              </div>
             </div>
           )}
 
           {hasResults && (
             <>
-              {/* Ward chart (collapsible) */}
               {showWard && wardStats.length > 0 && <WardChart stats={wardStats} />}
 
-              {/* Search + Sort bar */}
               <div className={s.tableToolbar}>
                 <div className={s.searchWrap}>
                   <Search size={13} className={s.searchIcon} />
@@ -576,7 +609,6 @@ function handleSaveEdit(updated: VoterRecord) {
                 <span className={s.countBadge}>{filtered.length} / {results.length}</span>
               </div>
 
-              {/* TABLE */}
               <div className={s.tableWrap}>
                 <table className={s.table}>
                   <thead>
@@ -599,6 +631,10 @@ function handleSaveEdit(updated: VoterRecord) {
                   <tbody>
                     {filtered.map((r, i) => {
                       const src = r.corrected
+                      const isMissing = r.status === 'Missing in Target'
+                      const isMismatch = r.status === 'Mismatch'
+                      const isPushable = isMismatch || isMissing
+
                       return (
                         <tr key={r.voterId} className={`${s.tr} ${s[`tr${r.status.replace(/ /g, '')}`] ?? ''}`}>
                           <td className={s.tdNum}>{i + 1}</td>
@@ -620,7 +656,7 @@ function handleSaveEdit(updated: VoterRecord) {
                           </td>
                           <td><StatusBadge status={r.status} /></td>
                           <td className={s.tdIssues}>
-                            {r.status === 'Mismatch' && Object.entries(r.mismatches).map(([f, d]) => (
+                            {isMismatch && Object.entries(r.mismatches).map(([f, d]) => (
                               <div key={f} className={s.miniDiff}>
                                 <span className={s.miniField}>{f}</span>
                                 <span className={s.miniOld}>{d.json || '∅'}</span>
@@ -628,28 +664,30 @@ function handleSaveEdit(updated: VoterRecord) {
                                 <span className={s.miniNew}>{d.pdf || '∅'}</span>
                               </div>
                             ))}
-                            {r.status !== 'Mismatch' && <span className={s.noIssue}>—</span>}
+                            {isMissing && (
+                              <span className={s.missingLabel}>Not in MongoDB — will insert</span>
+                            )}
+                            {!isMismatch && !isMissing && <span className={s.noIssue}>—</span>}
                           </td>
                           <td>
                             <div className={s.actionBtns}>
                               <button className={s.viewBtn} onClick={() => setViewResult(r)} title="View"><Eye size={12} /></button>
                               <button className={s.editIconBtn} onClick={() => setEditResult(r)} title="Edit"><Pencil size={12} /></button>
-                              {r.status === 'Mismatch' && (
-                               <button
-  className={`${s.pushBtn} ${pushedIds.has(r.voterId) ? s.pushBtnDone : ''}`}
-  onClick={() => {
-    const latest = results.find(x => x.voterId === r.voterId) ?? r
-    pushSingle(latest)
-  }}
-  disabled={pushingVoterId === r.voterId}  // ✅ only disable while actively pushing
-  title="Push corrected fields to MongoDB"
->
-  {pushingVoterId === r.voterId
-    ? <Loader2 size={11} className={s.spin} />
-    : pushedIds.has(r.voterId)
-    ? <CheckCircle2 size={11} color="var(--match)" />  // ✅ shows tick but still clickable
-    : <Database size={11} />}
-</button>
+                              {isPushable && (
+                                <button
+                                  className={`${s.pushBtn} ${pushedIds.has(r.voterId) ? s.pushBtnDone : ''} ${isMissing ? s.pushBtnInsert : ''}`}
+                                  onClick={() => pushSingle(r)}
+                                  disabled={pushingVoterId === r.voterId}
+                                  title={isMissing ? 'Insert this voter into MongoDB' : 'Push corrected fields to MongoDB'}
+                                >
+                                  {pushingVoterId === r.voterId
+                                    ? <Loader2 size={11} className={s.spin} />
+                                    : pushedIds.has(r.voterId)
+                                    ? <CheckCircle2 size={11} color="var(--match)" />
+                                    : isMissing
+                                    ? <UserPlus size={11} />
+                                    : <Database size={11} />}
+                                </button>
                               )}
                             </div>
                           </td>
@@ -667,7 +705,6 @@ function handleSaveEdit(updated: VoterRecord) {
         </main>
       </div>
 
-      {/* Modals */}
       {viewResult && (
         <RecordModal
           result={results.find(r => r.voterId === viewResult.voterId) ?? viewResult}

@@ -38,10 +38,7 @@ export function getBoothId(r: VoterRecord): string {
 }
 
 export function buildCorrected(pdf: VoterRecord | null, json: VoterRecord | null, mismatches: Record<string, FieldDiff>): VoterRecord {
-  // Start from json record (has extra DB fields like mobile, ward, email)
-  // Override fields where PDF is the source of truth
   const base: VoterRecord = { ...(json ?? {}), ...(pdf ?? {}) }
-  // For any mismatch, PDF wins
   Object.entries(mismatches).forEach(([f, diff]) => {
     if (diff.pdf) base[f] = diff.pdf
   })
@@ -123,68 +120,48 @@ export function computeWardStats(results: AuditResult[]): WardStat[] {
   return Array.from(map.values()).sort((a, b) => a.ward.localeCompare(b.ward))
 }
 
-// export async function extractPdfVoters(base64Pdf: string, apiKey: string): Promise<VoterRecord[]> {
-//   const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text, Booth 56).
-// Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
-// name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
-// relation name in Malayalam, house number/name, age (പ്രായം), gender.
+// ─── PDF CHUNKING ─────────────────────────────────────────────────────────────
+// Splits a base64 PDF into N-page chunks using pdf-lib (loaded via CDN in browser)
+// Falls back to sending the full PDF if pdf-lib is unavailable
 
-// Gender: explicitly "Male" or "Female" based on position (male=left column, female=right column pattern, or ഫോട്ടോ ലഭ്യമണ്/ലഭ്യമില്ല label).
-// Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
+async function splitPdfIntoChunks(base64Pdf: string, chunkSize: number): Promise<string[]> {
+  try {
+    // Dynamically import pdf-lib from CDN
+    const { PDFDocument } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js' as string) as { PDFDocument: { load: (b: Uint8Array) => Promise<{ getPageCount: () => number }> } }
 
-// Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
-// [{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
+    const pdfBytes = Uint8Array.from(atob(base64Pdf), c => c.charCodeAt(0))
+    // @ts-expect-error dynamic cdn import
+    const { PDFDocument: PDFDoc } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js')
+    const srcDoc = await PDFDoc.load(pdfBytes)
+    const totalPages = srcDoc.getPageCount()
+    const chunks: string[] = []
 
-//   // Calls local proxy (server.js) to avoid CORS
-//   const resp = await fetch('http://localhost:3001/api/anthropic', {
-//     method: 'POST',
-//     headers: {
-//       'Content-Type': 'application/json',
-//       'x-api-key': apiKey,
-//     },
-//     body: JSON.stringify({
-//       model: 'claude-opus-4-5',
-//       max_tokens: 16000,
-//       messages: [{
-//         role: 'user',
-//         content: [
-//           { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf } },
-//           { type: 'text', text: prompt },
-//         ],
-//       }],
-//     }),
-//   })
+    for (let start = 0; start < totalPages; start += chunkSize) {
+      const end = Math.min(start + chunkSize, totalPages)
+      const newDoc = await PDFDoc.create()
+      const pages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i))
+      pages.forEach((p: unknown) => newDoc.addPage(p))
+      const chunkBytes = await newDoc.save()
+      const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(chunkBytes)))
+      chunks.push(base64Chunk)
+    }
 
-//   if (!resp.ok) {
-//     const err = await resp.json() as { error?: { message?: string } }
-//     throw new Error('API error: ' + (err.error?.message ?? resp.status))
-//   }
+    return chunks
+  } catch {
+    // pdf-lib not available or failed — return full PDF as single chunk
+    return [base64Pdf]
+  }
+}
 
-//   const data = await resp.json() as { content: Array<{ type: string; text?: string }> }
-//   const text = data.content.map(b => b.text ?? '').join('')
-//   const clean = text.replace(/```json|```/g, '').trim()
-
-//   try {
-//     return JSON.parse(clean) as VoterRecord[]
-//   } catch {
-//     // Salvage truncated JSON
-//     const lastComma = clean.lastIndexOf('},')
-//     if (lastComma > 0) {
-//       const salvaged = (clean.startsWith('[') ? '' : '[') + clean.slice(0, lastComma + 1) + ']'
-//       try { return JSON.parse(salvaged) as VoterRecord[] } catch { /* fall through */ }
-//     }
-//     throw new Error('Failed to parse AI response. The PDF may be too large — try splitting pages.')
-//   }
-// }
-
-
-export async function extractPdfVoters(base64Pdf: string, apiKey: string): Promise<VoterRecord[]> {
-  const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text, Booth 56).
+// ─── GEMINI EXTRACTION (single chunk) ────────────────────────────────────────
+async function extractChunk(base64Chunk: string, apiKey: string, chunkIndex: number, totalChunks: number): Promise<VoterRecord[]> {
+  const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text).
 Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
 name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
 relation name in Malayalam, house number/name, age (പ്രായം), gender.
 
-Gender: explicitly "Male" or "Female" based on position (male=left column, female=right column pattern).
+This is chunk ${chunkIndex + 1} of ${totalChunks}. Extract EVERY voter card visible — do not skip any.
+Gender: "Male" or "Female" based on column position (left=Male, right=Female).
 Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
 
 Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
@@ -197,22 +174,14 @@ Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
       'x-api-key': apiKey,
     },
     body: JSON.stringify({
-     model: 'gemini-2.5-flash',        
+      model: 'gemini-2.5-flash',
       contents: [{
         parts: [
-          {
-            inline_data: {
-              mime_type: 'application/pdf',
-              data: base64Pdf,
-            },
-          },
+          { inline_data: { mime_type: 'application/pdf', data: base64Chunk } },
           { text: prompt },
         ],
       }],
-      generationConfig: {
-        maxOutputTokens: 16000,
-        temperature: 0,
-      },
+      generationConfig: { maxOutputTokens: 32000, temperature: 0 },
     }),
   })
 
@@ -222,27 +191,66 @@ Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
   }
 
   const data = await resp.json() as {
-    candidates: Array<{
-      content: { parts: Array<{ text: string }> }
-    }>
+    candidates: Array<{ content: { parts: Array<{ text: string }> } }>
   }
 
-  const text = data.candidates?.[0]?.content?.parts
-    ?.map(p => p.text ?? '')
-    .join('') ?? ''
-
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text ?? '').join('') ?? ''
   const clean = text.replace(/```json|```/g, '').trim()
 
   try {
     return JSON.parse(clean) as VoterRecord[]
   } catch {
+    // Salvage truncated JSON
     const lastComma = clean.lastIndexOf('},')
     if (lastComma > 0) {
       const salvaged = (clean.startsWith('[') ? '' : '[') + clean.slice(0, lastComma + 1) + ']'
       try { return JSON.parse(salvaged) as VoterRecord[] } catch { /* fall through */ }
     }
-    throw new Error('Failed to parse Gemini response. Try splitting the PDF into fewer pages.')
+    console.warn(`Chunk ${chunkIndex + 1} parse failed, returning empty`)
+    return []
   }
+}
+
+// ─── MAIN EXTRACTION — chunks full PDF, merges all records ───────────────────
+export async function extractPdfVoters(
+  base64Pdf: string,
+  apiKey: string,
+  onProgress?: (msg: string, pct: number) => void
+): Promise<VoterRecord[]> {
+  const CHUNK_PAGES = 30 // Process 30 pages at a time — safe for Gemini token limits
+
+  onProgress?.('Splitting PDF into chunks...', 5)
+  const chunks = await splitPdfIntoChunks(base64Pdf, CHUNK_PAGES)
+
+  onProgress?.(`PDF split into ${chunks.length} chunk(s). Starting extraction...`, 10)
+
+  const allRecords: VoterRecord[] = []
+  const seenVoterIds = new Set<string>()
+
+  for (let i = 0; i < chunks.length; i++) {
+    const pct = 10 + Math.round((i / chunks.length) * 70)
+    onProgress?.(
+      `Extracting chunk ${i + 1} of ${chunks.length} (pages ${i * CHUNK_PAGES + 1}–${(i + 1) * CHUNK_PAGES})...`,
+      pct
+    )
+
+    const records = await extractChunk(chunks[i], apiKey, i, chunks.length)
+
+    // Deduplicate by voterId across chunks (page boundaries may overlap)
+    for (const r of records) {
+      if (r.voterId && !seenVoterIds.has(r.voterId)) {
+        seenVoterIds.add(r.voterId)
+        allRecords.push(r)
+      }
+    }
+
+    onProgress?.(
+      `Chunk ${i + 1}/${chunks.length} done — ${records.length} voters extracted (total so far: ${allRecords.length})`,
+      pct + Math.round(70 / chunks.length)
+    )
+  }
+
+  return allRecords
 }
 
 export async function fileToBase64(file: File): Promise<string> {
@@ -272,40 +280,57 @@ export interface UpdateResult {
   error?: string
 }
 
+export interface InsertResult {
+  success: boolean
+  voterId: string
+  inserted?: boolean
+  error?: string
+}
+
 export interface BulkUpdateResult {
   success: boolean
   successCount: number
   notFoundCount: number
   errorCount: number
+  insertedCount: number
   totalSent: number
   errors: Array<{ voterId: string; error: string }>
 }
 
 /** Build fields-to-update object from an AuditResult (only mismatched fields, PDF values) */
-// export function buildUpdatePayload(result: AuditResult): Record<string, unknown> {
-//   const payload: Record<string, unknown> = {}
-//   for (const field of Object.keys(result.mismatches)) {
-//     const correctedVal = result.corrected[field as keyof VoterRecord]
-//     if (correctedVal !== undefined && correctedVal !== null && correctedVal !== '') {
-//       payload[field] = correctedVal  // ✅ uses edited corrected value
-//     }
-//   }
-//   return payload
-// }
-
 export function buildUpdatePayload(result: AuditResult): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
-
   for (const field of Object.keys(result.mismatches)) {
     const correctedVal = result.corrected[field as keyof VoterRecord]
     if (correctedVal !== undefined && correctedVal !== null && correctedVal !== '') {
-      payload[field] = correctedVal  // PDF value OR manually edited value
+      payload[field] = correctedVal
     }
   }
   return payload
 }
 
-/** Update a single voter — only mismatched fields */
+/** Build full insert payload from a PDF-only record (Missing in Target) */
+export function buildInsertPayload(result: AuditResult): Record<string, unknown> {
+  const pdf = result.pdf ?? result.corrected
+  return {
+    voterId:       pdf.voterId,
+    slNo:          pdf.slNo,
+    nameMl:        pdf.nameMl,
+    nameEn:        pdf.nameEn,
+    age:           pdf.age !== undefined ? parseInt(String(pdf.age)) || pdf.age : undefined,
+    gender:        pdf.gender,
+    relationType:  pdf.relationType,
+    relationNameMl: pdf.relationNameMl,
+    relationNameEn: pdf.relationNameEn,
+    houseMl:       pdf.houseMl,
+    houseEn:       pdf.houseEn,
+    auditStatus:   'new_from_pdf',
+    lastAuditedAt: new Date().toISOString(),
+    createdAt:     new Date().toISOString(),
+  }
+}
+
+/** Update a single mismatch voter */
 export async function pushSingleToDb(
   voterId: string,
   fields: Record<string, unknown>
@@ -320,21 +345,42 @@ export async function pushSingleToDb(
   return data
 }
 
-/** Bulk update all mismatched voters */
+/** Insert a single PDF-only voter into MongoDB */
+export async function insertSingleToDb(
+  record: Record<string, unknown>
+): Promise<InsertResult> {
+  const resp = await fetch('http://localhost:3001/api/insert-voter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ record }),
+  })
+  const data = await resp.json() as InsertResult & { error?: string }
+  if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)
+  return data
+}
+
+/** Bulk update mismatches + insert Missing-in-Target in one call */
 export async function pushBulkToDb(
-  results: import('./types').AuditResult[]
+  results: AuditResult[]
 ): Promise<BulkUpdateResult> {
   const updates = results
     .filter(r => r.status === 'Mismatch' && Object.keys(r.mismatches).length > 0)
     .map(r => ({ voterId: r.voterId, fields: buildUpdatePayload(r) }))
     .filter(u => Object.keys(u.fields).length > 0)
 
-  if (updates.length === 0) throw new Error('No mismatch records to update')
+  const inserts = results
+    .filter(r => r.status === 'Missing in Target')
+    .map(r => buildInsertPayload(r))
+    .filter(p => p.voterId)
+
+  if (updates.length === 0 && inserts.length === 0) {
+    throw new Error('No mismatch or missing records to push')
+  }
 
   const resp = await fetch('http://localhost:3001/api/update-voters-bulk', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ updates }),
+    body: JSON.stringify({ updates, inserts }),
   })
   const data = await resp.json() as BulkUpdateResult & { error?: string }
   if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)
