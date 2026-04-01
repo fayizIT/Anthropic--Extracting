@@ -258,7 +258,9 @@ function RecordModal({ result, onClose, onEdit }: {
 export default function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [jsonFile, setJsonFile] = useState<File | null>(null)
-  const [apiKey, setApiKey] = useState('AIzaSyC3Kfzvnhe5obcrGJq8dDH0zSx0Y61ao1Q')
+  // const [apiKey, setApiKey] = useState('AIzaSyC3Kfzvnhe5obcrGJq8dDH0zSx0Y61ao1Q')
+  const [apiKey, setApiKey] = useState(import.meta.env.VITE_GEMINI_API_KEY)
+
   const [boothId, setBoothId] = useState('')
 
   const [isRunning, setIsRunning] = useState(false)
