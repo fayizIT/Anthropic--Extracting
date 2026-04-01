@@ -15,6 +15,7 @@ import {
 } from './auditUtils'
 import { exportToExcel, exportToCSV, exportToJSON } from './exportUtils'
 import s from './App.module.css'
+import booths  from '../booths.json'
 
 type FilterType = 'all' | AuditStatus
 
@@ -257,7 +258,7 @@ function RecordModal({ result, onClose, onEdit }: {
 export default function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [jsonFile, setJsonFile] = useState<File | null>(null)
-  const [apiKey, setApiKey] = useState('')
+  const [apiKey, setApiKey] = useState('AIzaSyC3Kfzvnhe5obcrGJq8dDH0zSx0Y61ao1Q')
   const [boothId, setBoothId] = useState('')
 
   const [isRunning, setIsRunning] = useState(false)
@@ -518,9 +519,26 @@ export default function App() {
 
           <div className={s.sectionLabel} style={{ marginTop: 18 }}><BarChart3 size={11} /> Config</div>
           <div className={s.configStack}>
-            <div className={s.field}>
+            {/* <div className={s.field}>
               <label className={s.fieldLabel}>Booth MongoDB ID</label>
               <input className={s.input} value={boothId} onChange={e => setBoothId(e.target.value)} placeholder="69c57f7db65ab7300128dc53" />
+            </div> */}
+            <div className={s.field}>
+              <label className={s.fieldLabel}>Booth MongoDB ID</label>
+
+              <select
+                className={s.input}
+                value={boothId}
+                onChange={(e) => setBoothId(e.target.value)}
+              >
+                <option value="">Select Booth</option>
+
+                {booths.map((b) => (
+                  <option key={b._id} value={b._id}>
+                    Booth {b.boothNumber}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className={s.field}>
               <label className={s.fieldLabel}>Gemini API Key</label>
