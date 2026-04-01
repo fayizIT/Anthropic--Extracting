@@ -18,10 +18,7 @@ const COLLECTION = process.env.COLLECTION || 'voters'
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.use(cors({
-  origin: [
-    'http://localhost:5173', 'http://127.0.0.1:5173',
-    'http://localhost:3000', 'http://127.0.0.1:3000',
-  ]
+  origin: [ '*'], // Allow all origins (for development). In production, specify your frontend URL(s) here.
 }))
 app.use(express.json({ limit: '200mb' }))
 

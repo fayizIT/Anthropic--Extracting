@@ -19,6 +19,8 @@ export const FIELD_LABELS: Record<string, string> = {
   houseEn: 'House (English)',
 }
 
+const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
+
 export function normalize(val: unknown): string {
   if (val === undefined || val === null) return ''
   return String(val).trim()
@@ -167,7 +169,7 @@ Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn 
 Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
 [{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
 
-  const resp = await fetch('http://localhost:3001/api/gemini', {
+  const resp = await fetch(`${API_BASE_URL}/api/gemini`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -335,7 +337,7 @@ export async function pushSingleToDb(
   voterId: string,
   fields: Record<string, unknown>
 ): Promise<UpdateResult> {
-  const resp = await fetch('http://localhost:3001/api/update-voter', {
+  const resp = await fetch(`${API_BASE_URL}/api/update-voter`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ voterId, fields }),
@@ -349,7 +351,7 @@ export async function pushSingleToDb(
 export async function insertSingleToDb(
   record: Record<string, unknown>
 ): Promise<InsertResult> {
-  const resp = await fetch('http://localhost:3001/api/insert-voter', {
+  const resp = await fetch(`${API_BASE_URL}/api/insert-voter`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ record }),
@@ -377,7 +379,7 @@ export async function pushBulkToDb(
     throw new Error('No mismatch or missing records to push')
   }
 
-  const resp = await fetch('http://localhost:3001/api/update-voters-bulk', {
+  const resp = await fetch(`${API_BASE_URL}/api/update-voters-bulk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ updates, inserts }),
