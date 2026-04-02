@@ -1,5 +1,5 @@
 import type { VoterRecord, AuditResult, FieldDiff, WardStat } from './types'
-
+import { PDFDocument } from 'pdf-lib'
 export const COMPARE_FIELDS: (keyof VoterRecord)[] = [
   'slNo', 'nameMl', 'nameEn', 'age', 'gender',
   'relationType', 'relationNameMl', 'relationNameEn',
@@ -20,6 +20,8 @@ export const FIELD_LABELS: Record<string, string> = {
 }
 
 const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
+// const API_BASE_URL = 'http://localhost:3001'
+
 
 export function normalize(val: unknown): string {
   if (val === undefined || val === null) return ''
@@ -126,34 +128,85 @@ export function computeWardStats(results: AuditResult[]): WardStat[] {
 // Splits a base64 PDF into N-page chunks using pdf-lib (loaded via CDN in browser)
 // Falls back to sending the full PDF if pdf-lib is unavailable
 
+// async function splitPdfIntoChunks(base64Pdf: string, chunkSize: number): Promise<string[]> {
+//   try {
+//     // Dynamically import pdf-lib from CDN
+//     // const { PDFDocument } = await (import { PDFDocument } from 'pdf-lib') as string) as { PDFDocument: { load: (b: Uint8Array) => Promise<{ getPageCount: () => number }> } }
+
+//     const pdfBytes = Uint8Array.from(atob(base64Pdf), c => c.charCodeAt(0))
+//     // @ts-expect-error dynamic cdn import
+//     const { PDFDocument: PDFDoc } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js')
+//     const srcDoc = await PDFDoc.load(pdfBytes)
+//     const totalPages = srcDoc.getPageCount()
+//     const chunks: string[] = []
+
+//     for (let start = 0; start < totalPages; start += chunkSize) {
+//       const end = Math.min(start + chunkSize, totalPages)
+//       const newDoc = await PDFDoc.create()
+//       const pages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i))
+//       pages.forEach((p: unknown) => newDoc.addPage(p))
+//       const chunkBytes = await newDoc.save()
+//       const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(chunkBytes)))
+//       chunks.push(base64Chunk)
+//     }
+
+//     return chunks
+//   }
+//   //  catch {
+//   //   // pdf-lib not available or failed — return full PDF as single chunk
+//   //   return [base64Pdf]
+//   // }
+//   catch (err) {
+//   throw new Error('PDF splitting failed — cannot guarantee full extraction')
+// }
+// }
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 0x8000 // 32KB chunks (prevents stack overflow)
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const subarray = bytes.subarray(i, i + chunkSize)
+    binary += String.fromCharCode(...subarray)
+  }
+
+  return btoa(binary)
+}
+
 async function splitPdfIntoChunks(base64Pdf: string, chunkSize: number): Promise<string[]> {
   try {
-    // Dynamically import pdf-lib from CDN
-    const { PDFDocument } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js' as string) as { PDFDocument: { load: (b: Uint8Array) => Promise<{ getPageCount: () => number }> } }
-
     const pdfBytes = Uint8Array.from(atob(base64Pdf), c => c.charCodeAt(0))
-    // @ts-expect-error dynamic cdn import
-    const { PDFDocument: PDFDoc } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js')
-    const srcDoc = await PDFDoc.load(pdfBytes)
+    const srcDoc = await PDFDocument.load(pdfBytes)
+
     const totalPages = srcDoc.getPageCount()
     const chunks: string[] = []
 
     for (let start = 0; start < totalPages; start += chunkSize) {
       const end = Math.min(start + chunkSize, totalPages)
-      const newDoc = await PDFDoc.create()
-      const pages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i))
-      pages.forEach((p: unknown) => newDoc.addPage(p))
+
+      const newDoc = await PDFDocument.create()
+      const pages = await newDoc.copyPages(
+        srcDoc,
+        Array.from({ length: end - start }, (_, i) => start + i)
+      )
+
+      pages.forEach(p => newDoc.addPage(p))
+
       const chunkBytes = await newDoc.save()
-      const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(chunkBytes)))
+      // const base64Chunk = btoa(
+      //   String.fromCharCode(...new Uint8Array(chunkBytes))
+      // )
+      const base64Chunk = uint8ToBase64(new Uint8Array(chunkBytes))
       chunks.push(base64Chunk)
     }
-
+    console.log('Total chunks:', chunks.length)
     return chunks
-  } catch {
-    // pdf-lib not available or failed — return full PDF as single chunk
-    return [base64Pdf]
+  } catch (err) {
+    console.error('PDF split failed:', err)
+    throw new Error('PDF splitting failed — cannot guarantee full extraction')
   }
 }
+
 
 // ─── GEMINI EXTRACTION (single chunk) ────────────────────────────────────────
 async function extractChunk(base64Chunk: string, apiKey: string, chunkIndex: number, totalChunks: number): Promise<VoterRecord[]> {
@@ -213,46 +266,135 @@ Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
   }
 }
 
+async function extractChunkWithRetry(
+  chunk: string,
+  apiKey: string,
+  chunkIndex: number,
+  totalChunks: number,
+  retries = 2
+): Promise<VoterRecord[]> {
+  try {
+    return await extractChunk(chunk, apiKey, chunkIndex, totalChunks)
+  } catch (err) {
+    if (retries > 0) {
+      return extractChunkWithRetry(chunk, apiKey, chunkIndex, totalChunks, retries - 1)
+    }
+    console.warn(`Chunk ${chunkIndex + 1} failed after retries`)
+    return []
+  }
+}
+
+
+async function processChunksParallel(
+  chunks: string[],
+  apiKey: string,
+  onProgress?: (msg: string, pct: number) => void
+): Promise<VoterRecord[]> {
+  const CONCURRENCY = 3 // safe for Gemini
+
+  const allRecords: VoterRecord[] = []
+  const seen = new Set<string>()
+
+  let index = 0
+
+  async function worker(workerId: number) {
+    while (index < chunks.length) {
+      const i = index++
+      const pct = 10 + Math.round((i / chunks.length) * 70)
+
+      onProgress?.(
+        `Worker ${workerId} → Chunk ${i + 1}/${chunks.length}...`,
+        pct
+      )
+
+      try {
+        // const records = await extractChunk(chunks[i], apiKey, i, chunks.length)
+const records = await extractChunkWithRetry(
+  chunks[i],
+  apiKey,
+  i,
+  chunks.length
+)
+        let added = 0
+        for (const r of records) {
+          if (r.voterId && !seen.has(r.voterId)) {
+            seen.add(r.voterId)
+            allRecords.push(r)
+            added++
+          }
+        }
+
+        onProgress?.(
+          `✓ Chunk ${i + 1}: +${added} voters (total: ${allRecords.length})`,
+          pct + Math.round(70 / chunks.length)
+        )
+
+      } catch (e) {
+        onProgress?.(
+          `⚠️ Chunk ${i + 1} failed — retrying skipped`,
+          pct
+        )
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1))
+  )
+
+  return allRecords
+}
+
 // ─── MAIN EXTRACTION — chunks full PDF, merges all records ───────────────────
 export async function extractPdfVoters(
   base64Pdf: string,
   apiKey: string,
   onProgress?: (msg: string, pct: number) => void
 ): Promise<VoterRecord[]> {
-  const CHUNK_PAGES = 30 // Process 30 pages at a time — safe for Gemini token limits
+  const CHUNK_PAGES = 2 // Process 30 pages at a time — safe for Gemini token limits
 
   onProgress?.('Splitting PDF into chunks...', 5)
   const chunks = await splitPdfIntoChunks(base64Pdf, CHUNK_PAGES)
 
   onProgress?.(`PDF split into ${chunks.length} chunk(s). Starting extraction...`, 10)
 
-  const allRecords: VoterRecord[] = []
-  const seenVoterIds = new Set<string>()
+  // const allRecords: VoterRecord[] = []
+  // const seenVoterIds = new Set<string>()
 
-  for (let i = 0; i < chunks.length; i++) {
-    const pct = 10 + Math.round((i / chunks.length) * 70)
-    onProgress?.(
-      `Extracting chunk ${i + 1} of ${chunks.length} (pages ${i * CHUNK_PAGES + 1}–${(i + 1) * CHUNK_PAGES})...`,
-      pct
-    )
+  // for (let i = 0; i < chunks.length; i++) {
+  //   const pct = 10 + Math.round((i / chunks.length) * 70)
+  //   onProgress?.(
+  //     `Extracting chunk ${i + 1} of ${chunks.length} (pages ${i * CHUNK_PAGES + 1}–${(i + 1) * CHUNK_PAGES})...`,
+  //     pct
+  //   )
 
-    const records = await extractChunk(chunks[i], apiKey, i, chunks.length)
+  //   const records = await extractChunk(chunks[i], apiKey, i, chunks.length)
 
-    // Deduplicate by voterId across chunks (page boundaries may overlap)
-    for (const r of records) {
-      if (r.voterId && !seenVoterIds.has(r.voterId)) {
-        seenVoterIds.add(r.voterId)
-        allRecords.push(r)
-      }
-    }
+  //   // Deduplicate by voterId across chunks (page boundaries may overlap)
+  //   for (const r of records) {
+  //     if (r.voterId && !seenVoterIds.has(r.voterId)) {
+  //       seenVoterIds.add(r.voterId)
+  //       allRecords.push(r)
+  //     }
+  //   }
 
-    onProgress?.(
-      `Chunk ${i + 1}/${chunks.length} done — ${records.length} voters extracted (total so far: ${allRecords.length})`,
-      pct + Math.round(70 / chunks.length)
-    )
-  }
+  //   onProgress?.(
+  //     `Chunk ${i + 1}/${chunks.length} done — ${records.length} voters extracted (total so far: ${allRecords.length})`,
+  //     pct + Math.round(70 / chunks.length)
+  //   )
+  // }
 
-  return allRecords
+  // return allRecords
+
+const allRecords = await processChunksParallel(chunks, apiKey, onProgress)
+if (allRecords.length === 0) {
+  throw new Error('No voters extracted — possible Gemini failure')
+}
+
+if (chunks.length > 1 && allRecords.length < chunks.length * 5) {
+  console.warn('⚠️ Low extraction count — possible missed pages')
+}
+return allRecords
 }
 
 export async function fileToBase64(file: File): Promise<string> {
