@@ -74,11 +74,14 @@ export function compareRecords(
   pdfRecords.forEach(r => { if (r.voterId) pdfMap.set(r.voterId, r) })
 
   const jsonMap = new Map<string, VoterRecord>()
+  // jsonRecords.forEach(r => {
+  //   const bId = getBoothId(r)
+  //   if (boothId && bId && bId !== boothId) return
+  //   if (r.voterId) jsonMap.set(r.voterId, r)
+  // })
   jsonRecords.forEach(r => {
-    const bId = getBoothId(r)
-    if (boothId && bId && bId !== boothId) return
-    if (r.voterId) jsonMap.set(r.voterId, r)
-  })
+  if (r.voterId) jsonMap.set(r.voterId, r)
+})
 
   const allIds = new Set([...pdfMap.keys(), ...jsonMap.keys()])
   const results: AuditResult[] = []
