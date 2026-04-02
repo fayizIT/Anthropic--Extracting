@@ -20,7 +20,7 @@ export const FIELD_LABELS: Record<string, string> = {
 }
 
 const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
-// const API_BASE_URL = 'http://localhost:3001'
+// const API_BASE_URL = 'http://localhost:3001'    // for local testing
 
 
 export function normalize(val: unknown): string {
