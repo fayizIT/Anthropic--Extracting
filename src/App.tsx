@@ -15,7 +15,7 @@ import {
 } from './auditUtils'
 import { exportToExcel, exportToCSV, exportToJSON } from './exportUtils'
 import s from './App.module.css'
-import booths  from '../booths.json'
+import booths from '../booths.json'
 
 type FilterType = 'all' | AuditStatus
 
@@ -258,16 +258,12 @@ function RecordModal({ result, onClose, onEdit }: {
 export default function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [jsonFile, setJsonFile] = useState<File | null>(null)
-  // const [apiKey, setApiKey] = useState('AIzaSyC3Kfzvnhe5obcrGJq8dDH0zSx0Y61ao1Q')
   const [apiKey, setApiKey] = useState(import.meta.env.VITE_GEMINI_API_KEY)
-
   const [boothId, setBoothId] = useState('')
-
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
   const [error, setError] = useState<string | null>(null)
-
   const [results, setResults] = useState<AuditResult[]>([])
   const [filter, setFilter] = useState<FilterType>('all')
   const [search, setSearch] = useState('')
@@ -275,7 +271,6 @@ export default function App() {
   const [sortDir, setSortDir] = useState<SortDir>('asc')
   const [showWard, setShowWard] = useState(false)
   const [showExport, setShowExport] = useState(false)
-
   const [viewResult, setViewResult] = useState<AuditResult | null>(null)
   const [editResult, setEditResult] = useState<AuditResult | null>(null)
   const [pushingVoterId, setPushingVoterId] = useState<string | null>(null)
@@ -450,15 +445,12 @@ export default function App() {
         setProgressMsg(msg)
         setProgress(pct)
       })
-
       setProgress(82); setProgressMsg(`Extracted ${pdfRecords.length} records from PDF. Loading JSON...`)
       const txt = await fileToText(jsonFile)
       let jsonRecords: VoterRecord[] = JSON.parse(txt)
       if (!Array.isArray(jsonRecords)) jsonRecords = [jsonRecords]
-
       setProgress(90); setProgressMsg(`Loaded ${jsonRecords.length} JSON records. Comparing...`)
       const auditResults = compareRecords(pdfRecords, jsonRecords, boothId)
-
       setProgress(100)
       const m = auditResults.filter(r => r.status === 'Mismatch').length
       const mt = auditResults.filter(r => r.status === 'Missing in Target').length
@@ -471,11 +463,9 @@ export default function App() {
     }
   }
 
-  // Push a single mismatch correction OR insert a missing voter
   async function pushSingle(result: AuditResult) {
     const latest = results.find(r => r.voterId === result.voterId) ?? result
     setPushingVoterId(result.voterId)
-
     try {
       // if (latest.status === 'Missing in Target') {
       //   // Insert PDF-only voter into MongoDB
@@ -518,21 +508,29 @@ export default function App() {
     }
   }
 
-  // Bulk push: update all mismatches + insert all Missing in Target
   async function pushAllToDb() {
     setBulkPushing(true)
     setBulkResult(null)
     try {
       const res = await pushBulkToDb(results, boothId)
       setBulkResult(res)
-
-      // Mark all mismatches and missing-in-target as pushed
       const pushed = results
         .filter(r => r.status === 'Mismatch' || r.status === 'Missing in Target')
         .map(r => r.voterId)
       setPushedIds(prev => new Set([...prev, ...pushed]))
+
+      // ── ADD 3: success toast ──────────────────────────────────────────────
+      showToast(
+        `✅ ${res.successCount} mismatch${res.successCount !== 1 ? 'es' : ''} updated` +
+        (res.insertedCount ? `, ${res.insertedCount} new voter${res.insertedCount !== 1 ? 's' : ''} inserted` : '') +
+        (res.notFoundCount ? ` · ${res.notFoundCount} not found` : ''),
+        'success'
+      )
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Bulk push failed')
+      const msg = e instanceof Error ? e.message : 'Bulk push failed'
+      setError(msg)
+      // ── ADD 4: error toast ────────────────────────────────────────────────
+      showToast(`❌ ${msg}`, 'error')
     } finally {
       setBulkPushing(false)
     }
@@ -579,7 +577,6 @@ export default function App() {
                   </div>
                 )}
               </div>
-              {/* Bulk push: mismatches + missing-in-target */}
               <button
                 className={s.pushAllBtn}
                 onClick={pushAllToDb}
@@ -620,20 +617,14 @@ export default function App() {
 
           <div className={s.sectionLabel} style={{ marginTop: 18 }}><BarChart3 size={11} /> Config</div>
           <div className={s.configStack}>
-            {/* <div className={s.field}>
-              <label className={s.fieldLabel}>Booth MongoDB ID</label>
-              <input className={s.input} value={boothId} onChange={e => setBoothId(e.target.value)} placeholder="69c57f7db65ab7300128dc53" />
-            </div> */}
             <div className={s.field}>
               <label className={s.fieldLabel}>Booth MongoDB ID</label>
-
               <select
                 className={s.input}
                 value={boothId}
                 onChange={(e) => setBoothId(e.target.value)}
               >
                 <option value="">Select Booth</option>
-
                 {booths.map((b) => (
                   <option key={b._id} value={b._id}>
                     Booth {b.boothNumber}
@@ -838,6 +829,34 @@ export default function App() {
           onClose={() => setEditResult(null)}
         />
       )}
+
+      {/* ── ADD 5: Toast UI — just before closing </div> of s.app ── */}
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          zIndex: 9999,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '10px 16px',
+          borderRadius: 10,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.3)',
+          background: toast.type === 'success' ? 'var(--match, #22c55e)' : 'var(--missing, #ef4444)',
+          color: '#fff',
+          fontSize: 13,
+          fontWeight: 500,
+          maxWidth: 400,
+        }}>
+          <span>{toast.message}</span>
+          <button
+            onClick={() => setToast(null)}
+            style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 16, lineHeight: 1, opacity: 0.8, padding: 0 }}
+          >×</button>
+        </div>
+      )}
+
     </div>
   )
 }
