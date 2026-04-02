@@ -475,7 +475,7 @@ export default function App() {
       if (latest.status === 'Missing in Target') {
 
       // 🔍 Step 1: check if exists in DB
-      const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+      const checkRes = await fetch('https://gemini-extractor-backend.onrender.com', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ voterId: latest.voterId })
