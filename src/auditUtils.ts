@@ -5,7 +5,9 @@ export const COMPARE_FIELDS: (keyof VoterRecord)[] = [
   'relationType', 'relationNameMl', 'relationNameEn',
   'houseMl', 'houseEn',
 ]
-
+type ExtractedVoter = VoterRecord & {
+  isDeleted?: boolean
+}
 export const FIELD_LABELS: Record<string, string> = {
   slNo: 'Serial No',
   nameMl: 'Name (Malayalam)',
@@ -26,6 +28,20 @@ const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
 export function normalize(val: unknown): string {
   if (val === undefined || val === null) return ''
   return String(val).trim()
+}
+
+function fixMalayalam(pdfVal: string, jsonVal: string, fallbackEn?: string) {
+  // 🔥 If corrupted → prefer JSON
+  if (pdfVal.includes('�')) {
+    return jsonVal || fallbackEn || pdfVal
+  }
+
+  // 🔥 If suspicious (partial corruption)
+  if (jsonVal && pdfVal.length < jsonVal.length * 0.7) {
+    return jsonVal
+  }
+
+  return pdfVal
 }
 
 export function normalizeGender(v: string): string {
@@ -90,8 +106,24 @@ export function compareRecords(
     if (pdf && jsn) {
       const mismatches: Record<string, FieldDiff> = {}
       COMPARE_FIELDS.forEach(f => {
-        let pv = normalize(pdf[f])
-        let jv = normalize(jsn[f])
+let pv = normalize(pdf[f])
+let jv = normalize(jsn[f])
+
+// 🔥 Malayalam corruption fix
+if (f === 'nameMl') {
+  pv = fixMalayalam(pv, jv, normalize(pdf.nameEn))
+}
+
+if (f === 'relationNameMl') {
+  pv = fixMalayalam(pv, jv, normalize(pdf.relationNameEn))
+}
+
+if (f === 'houseMl') {
+  pv = fixMalayalam(pv, jv, normalize(pdf.houseEn))
+}
+if (pv !== normalize(pdf[f])) {
+  console.warn(`🔧 Fixed corrupted ${f} for ${pdf.voterId}`)
+}
         if (f === 'gender') { pv = normalizeGender(pv); jv = normalizeGender(jv) }
         if (f === 'age') { pv = String(parseInt(pv) || ''); jv = String(parseInt(jv) || '') }
         if (pv !== jv && (pv || jv)) mismatches[String(f)] = { pdf: pv, json: jv }
@@ -210,18 +242,87 @@ async function splitPdfIntoChunks(base64Pdf: string, chunkSize: number): Promise
 
 // ─── GEMINI EXTRACTION (single chunk) ────────────────────────────────────────
 async function extractChunk(base64Chunk: string, apiKey: string, chunkIndex: number, totalChunks: number): Promise<VoterRecord[]> {
-  const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text).
-Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
-name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
-relation name in Malayalam, house number/name, age (പ്രായം), gender.
+//   const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text).
+// Each voter card has: serial number, voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.),
+// name in Malayalam (പേര്), relation type (Father=അച്ഛൻ/Husband=ഭർത്താവ്/Mother=അമ്മ),
+// relation name in Malayalam, house number/name, age (പ്രായം), gender.
 
-This is chunk ${chunkIndex + 1} of ${totalChunks}. Extract EVERY voter card visible — do not skip any.
-Gender: "Male" or "Female" based on column position (left=Male, right=Female).
-Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
+// This is chunk ${chunkIndex + 1} of ${totalChunks}. Extract EVERY voter card visible — do not skip any.
+// Gender: "Male" or "Female" based on column position (left=Male, right=Female).
+// Transliterate ALL Malayalam text to English for nameEn, houseEn, relationNameEn fields.
 
-Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
-[{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
+// Return ONLY a raw JSON array (no markdown, no backticks, no explanation):
+// [{"slNo":"1","voterId":"UAZ1489186","nameMl":"ബിബിൻ ബാബു","nameEn":"Bibin Babu","age":27,"gender":"Male","relationType":"Father","relationNameMl":"ബാബു","relationNameEn":"Babu","houseMl":"പാറയ്ക്കൽ","houseEn":"Parayakkal"}]`
+const prompt = `Extract ALL voter records from this Kerala Electoral Roll PDF (Malayalam text).
 
+Each voter card contains:
+- Serial number (slNo)
+- Voter ID (e.g. UAZ..., MST..., LJG..., HVK..., DLL..., etc.)
+- Name in Malayalam (പേര്)
+- Relation type (Father=അച്ഛൻ / Husband=ഭർത്താവ് / Mother=അമ്മ)
+- Relation name in Malayalam
+- House name/number
+- Age (പ്രായം)
+- Gender (based on column position)
+
+⚠️ IMPORTANT — DELETED DETECTION:
+
+For EACH voter card, also return:
+"isDeleted": true | false
+"deletionConfidence": "High" | "Medium" | "Low"
+
+Set isDeleted = true if ANY of the following is present:
+- The word "DELETED" appears anywhere
+- A diagonal line crosses the voter card
+- The entry is struck out or visually cancelled
+- Any marking indicating removal
+
+Otherwise:
+"isDeleted": false
+
+❗ DO NOT skip any voter cards.
+Even deleted voters MUST be included, but marked correctly.
+
+This is chunk ${chunkIndex + 1} of ${totalChunks}.
+Extract EVERY voter card visible.
+
+Gender Rules:
+- Left column → Male
+- Right column → Female
+
+Transliteration Rules:
+- Convert ALL Malayalam text into English for:
+  - nameEn
+  - relationNameEn
+  - houseEn
+
+Return BOTH Malayalam and English fields:
+- nameMl + nameEn
+- relationNameMl + relationNameEn
+- houseMl + houseEn
+
+⚠️ OUTPUT FORMAT (STRICT):
+
+Return ONLY a raw JSON array.
+NO markdown, NO explanation, NO backticks.
+
+Example:
+[
+  {
+    "slNo": "1",
+    "voterId": "UAZ1489186",
+    "nameMl": "ബിബിൻ ബാബു",
+    "nameEn": "Bibin Babu",
+    "age": 27,
+    "gender": "Male",
+    "relationType": "Father",
+    "relationNameMl": "ബാബു",
+    "relationNameEn": "Babu",
+    "houseMl": "പാറയ്ക്കൽ",
+    "houseEn": "Parayakkal",
+    "isDeleted": false
+  }
+]`
   const resp = await fetch(`${API_BASE_URL}/api/gemini`, {
     method: 'POST',
     headers: {
@@ -349,6 +450,7 @@ const records = await extractChunkWithRetry(
 export async function extractPdfVoters(
   base64Pdf: string,
   apiKey: string,
+  boothNumber: string,
   onProgress?: (msg: string, pct: number) => void
 ): Promise<VoterRecord[]> {
   const CHUNK_PAGES = 2 // Process 30 pages at a time — safe for Gemini token limits
@@ -386,6 +488,23 @@ export async function extractPdfVoters(
 
   // return allRecords
 
+function exportDeletedVoters(
+  deleted: { slNo?: string; voterId?: string }[],
+  boothNumber: string
+) {
+  const data = JSON.stringify(deleted, null, 2)
+
+  const blob = new Blob([data], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `deleted_voters_booth_${boothNumber}.json`
+  a.click()
+
+  URL.revokeObjectURL(url)
+}
+
 const allRecords = await processChunksParallel(chunks, apiKey, onProgress)
 if (allRecords.length === 0) {
   throw new Error('No voters extracted — possible Gemini failure')
@@ -394,7 +513,38 @@ if (allRecords.length === 0) {
 if (chunks.length > 1 && allRecords.length < chunks.length * 5) {
   console.warn('⚠️ Low extraction count — possible missed pages')
 }
-return allRecords
+const validVoters: VoterRecord[] = []
+const deletedVoters: { slNo?: string; voterId?: string }[] = []
+
+for (const r of allRecords as ExtractedVoter[]) {
+
+  // 🔍 Fallback detection (in case Gemini misses)
+  const fallbackDeleted =
+    (r.nameEn || '').toLowerCase().includes('deleted') ||
+    (r.houseEn || '').toLowerCase().includes('deleted')
+
+  const isDeleted = r.isDeleted || fallbackDeleted
+
+  if (isDeleted) {
+    deletedVoters.push({
+      slNo: r.slNo,
+      voterId: r.voterId
+    })
+  } else {
+    validVoters.push(r)
+  }
+}
+
+console.log("Total:", allRecords.length)
+console.log("Valid:", validVoters.length)
+console.log("Deleted:", deletedVoters.length)
+
+// 👉 export JSON automatically
+if (deletedVoters.length > 0) {
+  exportDeletedVoters(deletedVoters, boothNumber)
+}
+
+return validVoters
 }
 
 export async function fileToBase64(file: File): Promise<string> {
@@ -505,17 +655,32 @@ export async function insertSingleToDb(
 
 /** Bulk update mismatches + insert Missing-in-Target in one call */
 export async function pushBulkToDb(
-  results: AuditResult[]
+  results: AuditResult[],
+  boothId: string
 ): Promise<BulkUpdateResult> {
   const updates = results
     .filter(r => r.status === 'Mismatch' && Object.keys(r.mismatches).length > 0)
     .map(r => ({ voterId: r.voterId, fields: buildUpdatePayload(r) }))
     .filter(u => Object.keys(u.fields).length > 0)
 
-  const inserts = results
-    .filter(r => r.status === 'Missing in Target')
-    .map(r => buildInsertPayload(r))
-    .filter(p => p.voterId)
+//   const inserts = results
+//     .filter(r => r.status === 'Missing in Target').map(r => ({
+//   ...buildInsertPayload(r),
+//   boothId: boothId   // 🔥 ADD THIS
+// }))
+//     // .map(r => buildInsertPayload(r))
+//     .filter(p => p.voterId)
+const inserts = results
+  .filter(r => r.status === 'Missing in Target')
+  .map(r => {
+    const payload = buildInsertPayload(r) as VoterRecord
+
+    return {
+      ...payload,
+      boothId: boothId
+    }
+  })
+  .filter(p => p.voterId)
 
   if (updates.length === 0 && inserts.length === 0) {
     throw new Error('No mismatch or missing records to push')

@@ -283,6 +283,15 @@ export default function App() {
   const [bulkResult, setBulkResult] = useState<BulkUpdateResult | null>(null)
   const [pushedIds, setPushedIds] = useState<Set<string>>(new Set())
 
+  // ── ADD 1: toast state ──────────────────────────────────────────────────────
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+
+  // ── ADD 2: showToast helper ─────────────────────────────────────────────────
+  function showToast(message: string, type: 'success' | 'error' = 'success') {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 4000)
+  }
+
   const stats: AuditStats = useMemo(() => ({
     total: results.length,
     match: results.filter(r => r.status === 'Match').length,
@@ -324,42 +333,109 @@ export default function App() {
     else { setSortField(field); setSortDir('asc') }
   }
 
-  function handleSaveEdit(updated: VoterRecord) {
-    if (!editResult) return
-    setResults(prev => prev.map(r => {
-      if (r.voterId !== editResult.voterId) return r
+  // function handleSaveEdit(updated: VoterRecord) {
+  //   if (!editResult) return
+  //   setResults(prev => prev.map(r => {
+  //     if (r.voterId !== editResult.voterId) return r
 
-      // Rebuild mismatches based on edited values vs original JSON
-      const newMismatches: typeof r.mismatches = {}
-      for (const [field, diff] of Object.entries(r.mismatches)) {
-        const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
-        if (editedVal !== diff.json) {
-          newMismatches[field] = { pdf: editedVal, json: diff.json }
+  //     // Rebuild mismatches based on edited values vs original JSON
+  //     const newMismatches: typeof r.mismatches = {}
+  //     for (const [field, diff] of Object.entries(r.mismatches)) {
+  //       const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
+  //       if (editedVal !== diff.json) {
+  //         newMismatches[field] = { pdf: editedVal, json: diff.json }
+  //       }
+  //     }
+
+  //     return {
+  //       ...r,
+  //       corrected: updated,
+  //       mismatches: newMismatches,
+  //       status: Object.keys(newMismatches).length === 0 ? 'Match' : 'Mismatch',
+  //     }
+  //   }))
+
+  //   // Re-enable push after re-edit
+  //   setPushedIds(prev => {
+  //     const next = new Set(prev)
+  //     next.delete(editResult.voterId)
+  //     return next
+  //   })
+
+  //   setEditResult(null)
+  // }
+  async function handleSaveEdit(updated: VoterRecord) {
+  if (!editResult) return
+
+  const newMismatches: typeof editResult.mismatches = {}
+  for (const [field, diff] of Object.entries(editResult.mismatches)) {
+    const editedVal = String(updated[field as keyof VoterRecord] ?? '').trim()
+    if (editedVal !== diff.json) {
+      newMismatches[field] = { pdf: editedVal, json: diff.json }
+    }
+  }
+
+  const updatedResult: AuditResult = {
+    ...editResult,
+    corrected: updated,
+    mismatches: newMismatches,
+    status: Object.keys(newMismatches).length === 0 ? 'Match' : editResult.status,
+  }
+
+  try {
+    if (editResult.status === 'Missing in Target') {
+      // Exists in PDF, not in DB → insert
+      const payload = buildInsertPayload(updatedResult)
+      await insertSingleToDb(payload)
+      showToast(`✅ ${updated.nameEn || editResult.voterId} inserted into DB`, 'success')
+
+    } else if (editResult.status === 'Missing in Source') {
+      // Exists in DB, not in PDF → update existing DB record with edited values
+      // Build payload manually from all edited COMPARE_FIELDS
+      const fields: Record<string, unknown> = {}
+      for (const field of COMPARE_FIELDS) {
+        const val = updated[field]
+        if (val !== undefined && val !== null && String(val).trim() !== '') {
+          fields[field as string] = val
         }
       }
-
-      return {
-        ...r,
-        corrected: updated,
-        mismatches: newMismatches,
-        status: Object.keys(newMismatches).length === 0 ? 'Match' : 'Mismatch',
+      if (Object.keys(fields).length > 0) {
+        await pushSingleToDb(editResult.voterId, fields)
+        showToast(`✅ ${updated.nameEn || editResult.voterId} updated in DB`, 'success')
+      } else {
+        showToast(`⚠️ No fields to update`, 'success')
       }
-    }))
 
-    // Re-enable push after re-edit
-    setPushedIds(prev => {
-      const next = new Set(prev)
-      next.delete(editResult.voterId)
-      return next
-    })
+    } else if (Object.keys(newMismatches).length > 0) {
+      // Normal mismatch → push only changed fields
+      const fields = buildUpdatePayload(updatedResult)
+      if (Object.keys(fields).length > 0) {
+        await pushSingleToDb(editResult.voterId, fields)
+        showToast(`✅ ${updated.nameEn || editResult.voterId} saved to DB`, 'success')
+      }
+    } else {
+      showToast(`✓ No changes to push for ${editResult.voterId}`, 'success')
+    }
 
-    setEditResult(null)
+    setPushedIds(prev => new Set([...prev, editResult.voterId]))
+
+  } catch (e) {
+    showToast(`❌ DB save failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error')
   }
+
+  setResults(prev => prev.map(r =>
+    r.voterId !== editResult.voterId ? r : updatedResult
+  ))
+  setEditResult(null)
+}
+  const selectedBooth = booths.find(b => b._id === boothId)
+  const boothNumber = selectedBooth?.boothNumber || ''
 
   async function runAudit() {
     if (!pdfFile) { setError('Upload the electoral roll PDF.'); return }
     if (!jsonFile) { setError('Upload the JSON voter records.'); return }
     if (!apiKey) { setError('Enter your Gemini API key.'); return }
+    if (!boothId) { setError('Select a booth first'); return }
 
     setError(null); setIsRunning(true); setResults([])
     setFilter('all'); setSearch('')
@@ -370,7 +446,7 @@ export default function App() {
       const b64 = await fileToBase64(pdfFile)
 
       // Pass progress callback so chunk-by-chunk updates show in UI
-      const pdfRecords = await extractPdfVoters(b64, apiKey, (msg, pct) => {
+      const pdfRecords = await extractPdfVoters(b64, apiKey,boothNumber, (msg, pct) => {
         setProgressMsg(msg)
         setProgress(pct)
       })
@@ -401,11 +477,34 @@ export default function App() {
     setPushingVoterId(result.voterId)
 
     try {
+      // if (latest.status === 'Missing in Target') {
+      //   // Insert PDF-only voter into MongoDB
+      //   const payload = buildInsertPayload(latest)
+      //   await insertSingleToDb(payload)
+      // } 
       if (latest.status === 'Missing in Target') {
-        // Insert PDF-only voter into MongoDB
+
+      // 🔍 Step 1: check if exists in DB
+      const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voterId: latest.voterId })
+      })
+
+      const { exists } = await checkRes.json()
+
+      if (exists) {
+        // 🔁 Step 2: update boothId
+        await pushSingleToDb(latest.voterId, {
+          boothId: boothId
+        })
+      } else {
+        // ➕ Step 3: insert new voter
         const payload = buildInsertPayload(latest)
         await insertSingleToDb(payload)
-      } else if (latest.status === 'Mismatch') {
+      }
+    }
+      else if (latest.status === 'Mismatch'||latest.status==='Missing in Source' ) {
         // Update existing voter with corrected fields
         const fields = buildUpdatePayload(latest)
         if (Object.keys(fields).length === 0) return
@@ -424,7 +523,7 @@ export default function App() {
     setBulkPushing(true)
     setBulkResult(null)
     try {
-      const res = await pushBulkToDb(results)
+      const res = await pushBulkToDb(results, boothId)
       setBulkResult(res)
 
       // Mark all mismatches and missing-in-target as pushed
