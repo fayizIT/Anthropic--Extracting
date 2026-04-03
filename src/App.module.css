@@ -369,3 +369,15 @@
   color: currentColor; opacity: 0.6; cursor: pointer;
 }
 .bannerClose:hover { opacity: 1; }
+
+
+.dismissBtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 5px;
+  border: 1px solid var(--border2);
+  background: transparent; cursor: pointer; color: var(--text3);
+  transition: background 0.15s, color 0.15s;
+}
+.dismissBtn:hover {
+  background: var(--missing, #ef4444); color: #fff; border-color: transparent;
+}

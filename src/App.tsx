@@ -252,6 +252,24 @@ function RecordModal({ result, onClose, onEdit }: {
       </div>
     </div>
   )
+}function CellValue({ field, result }: { field: string; result: AuditResult }) {
+  const diff = result.mismatches[field]
+  const val = normalize(result.corrected[field as keyof VoterRecord])
+
+  if (result.status === 'Missing in Target') {
+    return <span style={{ color: 'var(--missing)', fontStyle: 'italic', fontSize: 11 }}>{val || '—'}</span>
+  }
+
+  if (diff) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <span style={{ fontSize: 10, color: 'var(--text3)', textDecoration: 'line-through' }}>{diff.json || '∅'}</span>
+        <span style={{ fontSize: 12, color: 'var(--match)', fontWeight: 500 }}>{diff.pdf || '∅'}</span>
+      </div>
+    )
+  }
+
+  return <span>{val || '—'}</span>
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -278,6 +296,11 @@ export default function App() {
   const [bulkResult, setBulkResult] = useState<BulkUpdateResult | null>(null)
   const [pushedIds, setPushedIds] = useState<Set<string>>(new Set())
 
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set())
+
+  function dismissResult(voterId: string) {
+  setDismissedIds(prev => new Set([...prev, voterId]))
+}
   // ── ADD 1: toast state ──────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
 
@@ -299,7 +322,7 @@ export default function App() {
 
   const filtered = useMemo(() => {
     let data = filter === 'all' ? results : results.filter(r => r.status === filter)
-
+    data = data.filter(r => !dismissedIds.has(r.voterId))
     if (search.trim()) {
       const q = search.toLowerCase()
       data = data.filter(r =>
@@ -378,11 +401,10 @@ export default function App() {
   }
 
   try {
-    if (editResult.status === 'Missing in Target') {
-      // Exists in PDF, not in DB → insert
-      const payload = buildInsertPayload(updatedResult)
-      await insertSingleToDb(payload)
-      showToast(`✅ ${updated.nameEn || editResult.voterId} inserted into DB`, 'success')
+   if (editResult.status === 'Missing in Target') {
+  const payload = buildInsertPayload(updatedResult, boothId)  // ← pass boothId
+  await insertSingleToDb(payload, boothId)                    // ← pass boothId
+  showToast(`✅ ${updated.nameEn || editResult.voterId} inserted into DB`, 'success')
 
     } else if (editResult.status === 'Missing in Source') {
       // Exists in DB, not in PDF → update existing DB record with edited values
@@ -435,6 +457,7 @@ export default function App() {
     setError(null); setIsRunning(true); setResults([])
     setFilter('all'); setSearch('')
     setPushedIds(new Set())
+    setDismissedIds(new Set())
 
     try {
       setProgress(5); setProgressMsg('Reading PDF...')
@@ -466,42 +489,65 @@ export default function App() {
   async function pushSingle(result: AuditResult) {
     const latest = results.find(r => r.voterId === result.voterId) ?? result
     setPushingVoterId(result.voterId)
-    try {
-      // if (latest.status === 'Missing in Target') {
-      //   // Insert PDF-only voter into MongoDB
-      //   const payload = buildInsertPayload(latest)
-      //   await insertSingleToDb(payload)
-      // } 
+    // try {
+    //   // if (latest.status === 'Missing in Target') {
+    //   //   // Insert PDF-only voter into MongoDB
+    //   //   const payload = buildInsertPayload(latest)
+    //   //   await insertSingleToDb(payload)
+    //   // } 
+    //   if (latest.status === 'Missing in Target') {
+
+    //   // 🔍 Step 1: check if exists in DB
+    //   // const checkRes = await fetch('https://gemini-extractor-backend.onrender.com/api/check-voter', {
+    //   const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+      
+    //     method: 'POST',
+    //     headers: { 'Content-Type': 'application/json' },
+    //     body: JSON.stringify({ voterId: latest.voterId })
+    //   })
+
+    //   const { exists } = await checkRes.json()
+
+    //   if (exists) {
+    //     // 🔁 Step 2: update boothId
+    //     await pushSingleToDb(latest.voterId, {
+    //       boothId: boothId
+    //     })
+    //   }
+    //    else {
+    //     // ➕ Step 3: insert new voter
+    //     const payload = buildInsertPayload(latest)
+    //     await insertSingleToDb(payload)
+    //   }
+    // }
+    //   else if (latest.status === 'Mismatch'||latest.status==='Missing in Source' ) {
+    //     // Update existing voter with corrected fields
+    //     const fields = buildUpdatePayload(latest)
+    //     if (Object.keys(fields).length === 0) return
+    //     await pushSingleToDb(result.voterId, fields)
+    //   }
+    //   setPushedIds(prev => new Set([...prev, result.voterId]))
+    // }
+
+    try{
       if (latest.status === 'Missing in Target') {
+  const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voterId: latest.voterId })
+  })
+  const { exists } = await checkRes.json()
 
-      // 🔍 Step 1: check if exists in DB
-      const checkRes = await fetch('https://gemini-extractor-backend.onrender.com', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ voterId: latest.voterId })
-      })
-
-      const { exists } = await checkRes.json()
-
-      if (exists) {
-        // 🔁 Step 2: update boothId
-        await pushSingleToDb(latest.voterId, {
-          boothId: boothId
-        })
-      } else {
-        // ➕ Step 3: insert new voter
-        const payload = buildInsertPayload(latest)
-        await insertSingleToDb(payload)
-      }
+  if (exists) {
+    await pushSingleToDb(latest.voterId, { boothId: boothId }, boothId)  // ← add boothId
+  } else {
+    const payload = buildInsertPayload(latest, boothId)  // ← add boothId
+    await insertSingleToDb(payload, boothId)             // ← add boothId
+  }
+}
     }
-      else if (latest.status === 'Mismatch'||latest.status==='Missing in Source' ) {
-        // Update existing voter with corrected fields
-        const fields = buildUpdatePayload(latest)
-        if (Object.keys(fields).length === 0) return
-        await pushSingleToDb(result.voterId, fields)
-      }
-      setPushedIds(prev => new Set([...prev, result.voterId]))
-    } catch (e) {
+    
+    catch (e) {
       setError(e instanceof Error ? e.message : 'DB push failed')
     } finally {
       setPushingVoterId(null)
@@ -512,7 +558,8 @@ export default function App() {
     setBulkPushing(true)
     setBulkResult(null)
     try {
-      const res = await pushBulkToDb(results, boothId)
+      const activResults = results.filter(r => !dismissedIds.has(r.voterId))
+      const res = await pushBulkToDb(activResults, boothId)
       setBulkResult(res)
       const pushed = results
         .filter(r => r.status === 'Mismatch' || r.status === 'Missing in Target')
@@ -539,7 +586,12 @@ export default function App() {
   function handlePrint() { window.print() }
 
   const hasResults = results.length > 0
-  const pushableCount = stats.mismatch + stats.missingTarget
+  // const pushableCount = stats.mismatch + stats.missingTarget
+  const pushableCount = results.filter(
+  r => (r.status === 'Mismatch' || r.status === 'Missing in Target') 
+    && !dismissedIds.has(r.voterId)
+    && !pushedIds.has(r.voterId)
+).length
 
   const SortBtn = ({ field, label }: { field: SortField; label: string }) => (
     <button className={`${s.sortBtn} ${sortField === field ? s.sortBtnActive : ''}`}
@@ -750,7 +802,7 @@ export default function App() {
                           <td className={s.tdNum}>{i + 1}</td>
                           <td><span className={s.mono}>{r.slNo || '—'}</span></td>
                           <td><span className={s.monoAccent}>{r.voterId}</span></td>
-                          <td className={s.tdMl}>{normalize(src.nameMl) || '—'}</td>
+                          {/* <td className={s.tdMl}>{normalize(src.nameMl) || '—'}</td>
                           <td>{normalize(src.nameEn) || '—'}</td>
                           <td className={s.tdCenter}>{normalize(src.age) || '—'}</td>
                           <td className={s.tdCenter}>
@@ -759,7 +811,16 @@ export default function App() {
                             </span>
                           </td>
                           <td className={s.tdMl}>{normalize(src.houseMl) || '—'}</td>
-                          <td>{normalize(src.houseEn) || '—'}</td>
+                          <td>{normalize(src.houseEn) || '—'}</td> */}
+                          <td className={s.tdMl}><CellValue field="nameMl" result={r} /></td>
+                          <td><CellValue field="nameEn" result={r} /></td>
+                          <td className={s.tdCenter}><CellValue field="age" result={r} /></td>
+                          <td className={s.tdCenter}>
+                            <CellValue field="gender" result={r} />
+                          </td>
+                          <td className={s.tdMl}><CellValue field="houseMl" result={r} /></td>
+                          <td><CellValue field="houseEn" result={r} /></td>
+
                           <td className={s.tdRelation}>
                             {normalize(src.relationType) && <span className={s.relType}>{normalize(src.relationType)[0]}</span>}
                             {normalize(src.relationNameEn) || '—'}
@@ -797,6 +858,15 @@ export default function App() {
                                     : isMissing
                                     ? <UserPlus size={11} />
                                     : <Database size={11} />}
+                                </button>
+                              )}
+                              {isPushable && !pushedIds.has(r.voterId) && (
+                                <button
+                                  className={s.dismissBtn}
+                                  onClick={() => dismissResult(r.voterId)}
+                                  title="Remove from bulk push"
+                                >
+                                  <X size={11} />
                                 </button>
                               )}
                             </div>

@@ -21,8 +21,8 @@ export const FIELD_LABELS: Record<string, string> = {
   houseEn: 'House (English)',
 }
 
-const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
-// const API_BASE_URL = 'http://localhost:3001'    // for local testing
+// const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
+const API_BASE_URL = 'http://localhost:3001'    // for local testing
 
 
 export function normalize(val: unknown): string {
@@ -30,16 +30,28 @@ export function normalize(val: unknown): string {
   return String(val).trim()
 }
 
-function fixMalayalam(pdfVal: string, jsonVal: string, fallbackEn?: string) {
-  // 🔥 If corrupted → prefer JSON
-  if (pdfVal.includes('�')) {
-    return jsonVal || fallbackEn || pdfVal
-  }
+// function fixMalayalam(pdfVal: string, jsonVal: string, fallbackEn?: string) {
+//   // 🔥 If corrupted → prefer JSON
+//   if (pdfVal.includes('�')) {
+//     return jsonVal || fallbackEn || pdfVal
+//   }
 
-  // 🔥 If suspicious (partial corruption)
-  if (jsonVal && pdfVal.length < jsonVal.length * 0.7) {
-    return jsonVal
-  }
+//   // 🔥 If suspicious (partial corruption)
+//   if (jsonVal && pdfVal.length < jsonVal.length * 0.7) {
+//     return jsonVal
+//   }
+
+//   return pdfVal
+// }
+
+function fixMalayalam(pdfVal: string, jsonVal: string, fallbackEn?: string): string {
+  const pdfCorrupted = pdfVal.includes('�')
+  const jsonCorrupted = jsonVal.includes('�')
+
+  if (pdfCorrupted && !jsonCorrupted && jsonVal) return jsonVal
+  if (jsonCorrupted && !pdfCorrupted && pdfVal) return pdfVal
+  if (pdfCorrupted && jsonCorrupted) return fallbackEn || pdfVal
+  if (jsonVal && pdfVal.length < jsonVal.length * 0.7) return jsonVal
 
   return pdfVal
 }
@@ -128,7 +140,11 @@ if (pv !== normalize(pdf[f])) {
   console.warn(`🔧 Fixed corrupted ${f} for ${pdf.voterId}`)
 }
         if (f === 'gender') { pv = normalizeGender(pv); jv = normalizeGender(jv) }
-        if (f === 'age') { pv = String(parseInt(pv) || ''); jv = String(parseInt(jv) || '') }
+        if (f === 'age') {
+  const pa = parseInt(pv); const ja = parseInt(jv)
+  pv = isNaN(pa) ? '' : String(pa)
+  jv = isNaN(ja) ? '' : String(ja)
+}
         if (pv !== jv && (pv || jv)) mismatches[String(f)] = { pdf: pv, json: jv }
       })
       results.push({
@@ -215,9 +231,9 @@ async function splitPdfIntoChunks(base64Pdf: string, chunkSize: number): Promise
 
     const totalPages = srcDoc.getPageCount()
     const chunks: string[] = []
-
+    const OVERLAP = 1
     for (let start = 0; start < totalPages; start += chunkSize) {
-      const end = Math.min(start + chunkSize, totalPages)
+      const end = Math.min(start + chunkSize+ OVERLAP, totalPages)
 
       const newDoc = await PDFDocument.create()
       const pages = await newDoc.copyPages(
@@ -607,8 +623,9 @@ export function buildUpdatePayload(result: AuditResult): Record<string, unknown>
 }
 
 /** Build full insert payload from a PDF-only record (Missing in Target) */
-export function buildInsertPayload(result: AuditResult): Record<string, unknown> {
+export function buildInsertPayload(result: AuditResult, boothId?: string): Record<string, unknown> {
   const pdf = result.pdf ?? result.corrected
+  const resolvedBoothId = boothId ?? getBoothId(pdf as VoterRecord) ?? undefined
   return {
     voterId:       pdf.voterId,
     slNo:          pdf.slNo,
@@ -621,6 +638,7 @@ export function buildInsertPayload(result: AuditResult): Record<string, unknown>
     relationNameEn: pdf.relationNameEn,
     houseMl:       pdf.houseMl,
     houseEn:       pdf.houseEn,
+    ...(resolvedBoothId ? { boothId: resolvedBoothId } : {}),
     auditStatus:   'new_from_pdf',
     lastAuditedAt: new Date().toISOString(),
     createdAt:     new Date().toISOString(),
@@ -630,12 +648,19 @@ export function buildInsertPayload(result: AuditResult): Record<string, unknown>
 /** Update a single mismatch voter */
 export async function pushSingleToDb(
   voterId: string,
-  fields: Record<string, unknown>
+  fields: Record<string,  unknown>,
+  boothId?: string,
 ): Promise<UpdateResult> {
   const resp = await fetch(`${API_BASE_URL}/api/update-voter`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ voterId, fields }),
+    body: JSON.stringify({
+      voterId,
+      fields: {
+        ...fields,
+        ...(boothId ? { boothId } : {}),   // ← always send boothId
+      },
+    }),
   })
   const data = await resp.json() as UpdateResult & { error?: string }
   if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)
@@ -644,12 +669,18 @@ export async function pushSingleToDb(
 
 /** Insert a single PDF-only voter into MongoDB */
 export async function insertSingleToDb(
-  record: Record<string, unknown>
+  record: Record<string, unknown>,
+  boothId?: string 
 ): Promise<InsertResult> {
   const resp = await fetch(`${API_BASE_URL}/api/insert-voter`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ record }),
+   body: JSON.stringify({
+      record: {
+        ...record,
+        ...(boothId ? { boothId } : {}),   // ← ensure boothId is always sent
+      },
+    }),
   })
   const data = await resp.json() as InsertResult & { error?: string }
   if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)
@@ -676,7 +707,7 @@ export async function pushBulkToDb(
 const inserts = results
   .filter(r => r.status === 'Missing in Target')
   .map(r => {
-    const payload = buildInsertPayload(r) as VoterRecord
+    const payload = buildInsertPayload(r,boothId) as VoterRecord
 
     return {
       ...payload,
