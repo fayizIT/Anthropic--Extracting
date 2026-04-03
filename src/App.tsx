@@ -531,7 +531,9 @@ export default function App() {
 
     try{
       if (latest.status === 'Missing in Target') {
-  const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+  // const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+  const checkRes = await fetch('https://gemini-extractor-backend.onrender.com/api/check-voter', {
+
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ voterId: latest.voterId })
