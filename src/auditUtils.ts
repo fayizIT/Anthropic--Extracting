@@ -21,8 +21,8 @@ export const FIELD_LABELS: Record<string, string> = {
   houseEn: 'House (English)',
 }
 
-const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
-// const API_BASE_URL = 'http://localhost:3001'    // for local testing
+// const API_BASE_URL = 'https://gemini-extractor-backend.onrender.com'
+const API_BASE_URL = 'http://localhost:3001'    // for local testing
 
 
 export function normalize(val: unknown): string {
@@ -716,14 +716,14 @@ const inserts = results
   })
   .filter(p => p.voterId)
 
-  if (updates.length === 0 && inserts.length === 0) {
-    throw new Error('No mismatch or missing records to push')
+  if (updates.length === 0) {
+    throw new Error('No mismatch records to push')
   }
 
   const resp = await fetch(`${API_BASE_URL}/api/update-voters-bulk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ updates, inserts }),
+    body: JSON.stringify({ updates, inserts: [] }),
   })
   const data = await resp.json() as BulkUpdateResult & { error?: string }
   if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)

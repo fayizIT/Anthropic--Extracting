@@ -531,8 +531,8 @@ export default function App() {
 
     try{
       if (latest.status === 'Missing in Target') {
-  // const checkRes = await fetch('http://localhost:3001/api/check-voter', {
-  const checkRes = await fetch('https://gemini-extractor-backend.onrender.com/api/check-voter', {
+  const checkRes = await fetch('http://localhost:3001/api/check-voter', {
+  // const checkRes = await fetch('https://gemini-extractor-backend.onrender.com/api/check-voter', {
 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -541,12 +541,41 @@ export default function App() {
   const { exists } = await checkRes.json()
 
   if (exists) {
-    await pushSingleToDb(latest.voterId, { boothId: boothId }, boothId)  // ← add boothId
+     // ✅ Send ALL pdf fields + boothId as an update
+    const fields: Record<string, unknown> = {
+      slNo:           latest.pdf?.slNo,
+      nameMl:         latest.pdf?.nameMl,
+      nameEn:         latest.pdf?.nameEn,
+      age:            latest.pdf?.age,
+      gender:         latest.pdf?.gender,
+      relationType:   latest.pdf?.relationType,
+      relationNameMl: latest.pdf?.relationNameMl,
+      relationNameEn: latest.pdf?.relationNameEn,
+      houseMl:        latest.pdf?.houseMl,
+      houseEn:        latest.pdf?.houseEn,
+      boothId:        boothId,
+    }
+    // Remove undefined fields
+    Object.keys(fields).forEach(k => {
+      if (fields[k] === undefined || fields[k] === null || fields[k] === '') {
+        delete fields[k]
+      }
+    })
+    // await pushSingleToDb(latest.voterId, { boothId: boothId }, boothId)  // ← add boothId
+    await pushSingleToDb(latest.voterId, fields)
   } else {
     const payload = buildInsertPayload(latest, boothId)  // ← add boothId
     await insertSingleToDb(payload, boothId)             // ← add boothId
   }
-}
+   
+} else if (latest.status === 'Mismatch' || latest.status === 'Missing in Source') {
+    // ← this block was missing
+    const fields = buildUpdatePayload(latest)
+    if (Object.keys(fields).length === 0) return
+    await pushSingleToDb(latest.voterId, fields)
+  }
+
+  setPushedIds(prev => new Set([...prev, latest.voterId]))
     }
     
     catch (e) {
@@ -564,7 +593,7 @@ export default function App() {
       const res = await pushBulkToDb(activResults, boothId)
       setBulkResult(res)
       const pushed = results
-        .filter(r => r.status === 'Mismatch' || r.status === 'Missing in Target')
+        .filter(r => r.status === 'Mismatch')
         .map(r => r.voterId)
       setPushedIds(prev => new Set([...prev, ...pushed]))
 
@@ -590,7 +619,7 @@ export default function App() {
   const hasResults = results.length > 0
   // const pushableCount = stats.mismatch + stats.missingTarget
   const pushableCount = results.filter(
-  r => (r.status === 'Mismatch' || r.status === 'Missing in Target') 
+  r => (r.status === 'Mismatch') 
     && !dismissedIds.has(r.voterId)
     && !pushedIds.has(r.voterId)
 ).length
@@ -635,7 +664,7 @@ export default function App() {
                 className={s.pushAllBtn}
                 onClick={pushAllToDb}
                 disabled={bulkPushing || pushableCount === 0}
-                title={`Push ${stats.mismatch} mismatches + insert ${stats.missingTarget} missing voters`}
+                title={`Push ${stats.mismatch} mismatches to DB`}
               >
                 {bulkPushing
                   ? <><Loader2 size={13} className={s.spin} /> Pushing...</>
@@ -838,7 +867,7 @@ export default function App() {
                               </div>
                             ))}
                             {isMissing && (
-                              <span className={s.missingLabel}>Not in MongoDB — will insert</span>
+                              <span className={s.missingLabel}>Not in MongoDB — push row to sync</span>
                             )}
                             {!isMismatch && !isMissing && <span className={s.noIssue}>—</span>}
                           </td>
